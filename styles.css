@@ -114,10 +114,17 @@ button.item { width: 100%; border: 0; border-bottom: 1px solid var(--linea); bac
 .tag.interesado { background: var(--ok-suave); color: var(--ok); }
 .tag.otro { background: var(--aviso-suave); color: var(--aviso); }
 .tag.app { background: var(--neutro-suave); color: var(--texto); box-shadow: inset 0 0 0 1px var(--borde); }
+.tag-cita { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--borde); vertical-align: 2px; white-space: nowrap; color: var(--texto-2); }
+.tag-cita.visita { color: var(--ok); }
+.tag-cita.captacion { color: var(--acento); }
+.tag-cita.reunion { color: var(--aviso); }
 .estado { font-weight: 600; }
 .estado.chico { font-size: 12px; }
-.estado.Disponible, .estado.Realizada { color: var(--ok); }
-.estado.Reservado, .estado.Pendiente { color: var(--aviso); }
+.estado.Disponible, .estado.Realizada, .estado.Concretada { color: var(--ok); }
+.estado.Reservado, .estado.Pendiente, .estado.Activa { color: var(--aviso); }
+.alerta-texto { color: var(--rojo); font-weight: 600; }
+.sello { align-self: flex-start; display: inline-flex; align-items: center; gap: 7px; margin-top: 4px; padding: 3px 11px 3px 9px; border-radius: 999px; background: var(--aviso-suave); color: var(--aviso); font-size: 12.5px; font-weight: 600; line-height: 1.4; }
+.sello::before { content: ''; width: 6px; height: 6px; border-radius: 3px; background: currentColor; flex-shrink: 0; }
 .estado.Vendido, .estado.Alquilado, .estado.Cancelada { color: var(--texto-2); }
 
 /* Avatares e íconos de tipo */
@@ -181,6 +188,7 @@ a.prop:hover { border-color: var(--borde-campo); }
 
 /* Formularios */
 form.formulario { display: flex; flex-direction: column; gap: 18px; }
+.grupo { display: flex; flex-direction: column; gap: 18px; }
 .campo { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .campo > label, .campo > .etiqueta { font-size: 14px; font-weight: 600; }
 .campo .opcional { font-weight: 400; color: var(--texto-2); }
