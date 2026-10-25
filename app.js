@@ -1,4 +1,4 @@
-/* App Inmobiliaria — lógica del celular (JavaScript sin frameworks) */
+/* App Grupo Alquis Perú — lógica del celular (JavaScript sin frameworks) */
 (function () {
   'use strict';
 
@@ -10,9 +10,12 @@
   var ESTADOS_CITA = ['Pendiente', 'Realizada', 'Cancelada'];
   var TABLA_DE = { propietario: 'Propietarios', interesado: 'Interesados', otro: 'OtrosContactos' };
   var NOMBRE_TIPO = { propietario: 'Propietario', interesado: 'Interesado', otro: 'Otro' };
+  var MARCA = 'Grupo Alquis Perú';
+  var MIN_CONTRASENA = 8;
+  var REDES = [['facebook', 'Facebook'], ['tiktok', 'TikTok'], ['instagram', 'Instagram']];
 
   var S = {
-    pin: leerLocal('inmo_pin') || '',
+    token: leerLocal('inmo_token') || '',
     db: leerJSON('inmo_cache'),
     pub: null,
     cargandoDb: false,
@@ -49,6 +52,8 @@
     var p = String(n || '?').trim().split(/\s+/);
     return ((p[0] || '?')[0] + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase();
   }
+  function urlSegura(u) { u = String(u || '').trim(); return /^https:\/\/[^\s"'<>]+$/i.test(u) ? u : ''; }
+  function marca(c) { return c && c.negocio && c.negocio !== 'Mi Inmobiliaria' ? c.negocio : MARCA; }
   function soloDigitos(t) { return String(t || '').replace(/\D/g, ''); }
   function telLink(cel) { var d = soloDigitos(cel); return d ? 'tel:' + d : ''; }
   function wspLink(cel, texto) {
@@ -115,7 +120,14 @@
     lupa: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5"/>',
     salir: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l-4-4 4-4M6 12h10"/>',
     recargar: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
-    llamadas: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/><path d="M15 3.5a5.5 5.5 0 0 1 5.5 5.5"/>'
+    llamadas: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/><path d="M15 3.5a5.5 5.5 0 0 1 5.5 5.5"/>',
+    flecha: '<path d="M9 5l7 7-7 7"/>',
+    candado: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+    ojo: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+    ojoNo: '<path d="M3 3l18 18M10.6 5.6A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.9 3.6M6.6 6.6C3.9 8.3 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
+    facebook: '<path fill="currentColor" stroke="none" d="M13.4 21v-7.6H16l.4-3h-3V8.5c0-.9.3-1.5 1.5-1.5h1.6V4.3c-.3 0-1.2-.1-2.3-.1-2.3 0-3.9 1.4-3.9 4v2.2H7.7v3h2.6V21z"/>',
+    tiktok: '<path fill="currentColor" stroke="none" d="M16.3 3c.3 2.3 1.6 3.7 3.9 3.9v3a7 7 0 0 1-3.8-1.2v6.2A5.6 5.6 0 1 1 11 9.3c.3 0 .6 0 .9.1v3.1a2.6 2.6 0 1 0 1.8 2.5V3z"/>',
+    instagram: '<rect x="3.5" y="3.5" width="17" height="17" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.2" cy="6.8" r="1.1" fill="currentColor" stroke="none"/>'
   };
   function ic(n, t) {
     t = t || 22;
@@ -202,13 +214,16 @@
   /* ================= Conexión con el servidor ================= */
 
   function api(accion, data) {
-    if (DEMO) return Promise.resolve(Demo.manejar({ action: accion, pin: S.pin, data: data }));
-    return fetch(CFG.API_URL, {
+    var pedido = DEMO ? Promise.resolve(Demo.manejar({ action: accion, token: S.token, data: data || {} })) : fetch(CFG.API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: accion, pin: S.pin, data: data || {} })
+      body: JSON.stringify({ action: accion, token: S.token, data: data || {} })
     }).then(function (r) { return r.json(); }).catch(function () {
       return { ok: false, error: 'Sin conexión. Revisa tu internet e inténtalo de nuevo.' };
+    });
+    return pedido.then(function (r) {
+      if (r && r.auth === false && S.token) sesionVencida();
+      return r;
     });
   }
 
@@ -222,9 +237,7 @@
         S.db = r.data; S.db._t = Date.now();
         guardarLocal('inmo_cache', JSON.stringify(S.db));
         render();
-      } else if (r.auth === false) {
-        salirAgente(); toast('Tu PIN cambió. Vuelve a ingresar.');
-      } else if (!S.db) {
+      } else if (r.auth !== false && !S.db) {
         toast(r.error || 'No se pudieron cargar los datos.');
       }
     });
@@ -253,10 +266,19 @@
     });
   }
 
+  function olvidarSesion() {
+    S.token = ''; S.db = null;
+    guardarLocal('inmo_token', null); guardarLocal('inmo_cache', null);
+  }
   function salirAgente() {
-    S.pin = ''; S.db = null;
-    guardarLocal('inmo_pin', null); guardarLocal('inmo_cache', null);
+    if (S.token) api('logout');
+    olvidarSesion();
     ir('#/');
+  }
+  function sesionVencida() {
+    olvidarSesion();
+    toast('Tu sesión venció o se cerró. Vuelve a ingresar.');
+    ir('#/agente');
   }
 
   /* ================= Acceso a datos ================= */
@@ -297,13 +319,13 @@
     var r = ruta();
     var p = r.partes;
     if (p[0] === 'a') {
-      if (!S.pin) return ir('#/agente');
+      if (!S.token) return ir('#/agente');
       if (!S.db) { pintar('<div class="pantalla"><div class="vacio">Cargando tus datos…</div></div>'); cargarDb(true); return; }
       cargarDb(false);
       var v = VISTAS[p[1]] || VISTAS.inicio;
       return v(p.slice(2), r.q);
     }
-    if ((!p.length || p[0] === 'agente') && S.pin) return ir('#/a/inicio');
+    if ((!p.length || p[0] === 'agente') && S.token) return ir('#/a/inicio');
     var vp = { agente: vLogin, publicar: vPublicar, busco: vBusco, p: vDetallePub }[p[0]] || vCatalogo;
     vp(p.slice(1), r.q);
   }
@@ -364,6 +386,23 @@
     }
     return '<div class="campo">' + h + '</div>';
   }
+  function campoClave(n, etiqueta, autocompletar) {
+    var id = 'f_' + n;
+    return '<div class="campo"><label for="' + id + '">' + esc(etiqueta) + '</label><div class="campo-clave">' +
+      '<input id="' + id + '" name="' + n + '" type="password" autocomplete="' + autocompletar + '" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="200">' +
+      '<button type="button" class="ver-clave" data-ver="' + id + '" aria-label="Mostrar contraseña" aria-pressed="false">' + ic('ojo', 22) + '</button></div></div>';
+  }
+  function enlazarVerClave(app) {
+    app.querySelectorAll('[data-ver]').forEach(function (b) {
+      b.onclick = function () {
+        var inp = document.getElementById(b.dataset.ver), ver = inp.type === 'password';
+        inp.type = ver ? 'text' : 'password';
+        b.setAttribute('aria-pressed', String(ver));
+        b.setAttribute('aria-label', ver ? 'Ocultar contraseña' : 'Mostrar contraseña');
+        b.innerHTML = ic(ver ? 'ojoNo' : 'ojo', 22);
+      };
+    });
+  }
   function leerForm(form) {
     var d = {};
     Array.prototype.forEach.call(form.elements, function (el) {
@@ -418,11 +457,20 @@
     if (S.pub) return cb();
     api('publico').then(function (r) {
       if (r.ok) { S.pub = r.data; cb(); }
-      else pintar('<div class="pantalla publica"><div class="vacio">' + esc(r.error || 'No se pudo cargar el catálogo.') + '</div><button class="btn" onclick="location.reload()">Intentar de nuevo</button></div>');
+      else pintar('<div class="pantalla publica"><div class="vacio">' + esc(r.error || 'No se pudo cargar el catálogo.') + '</div><button class="btn" data-reintentar>Intentar de nuevo</button></div>', function (app) {
+        app.querySelector('[data-reintentar]').onclick = function () { location.reload(); };
+      });
     });
   }
   function avisoDemo() {
-    return DEMO ? '<div class="aviso-demo">Modo demo: los datos son de ejemplo y se guardan solo en este celular. PIN del agente: 1234.</div>' : '';
+    return DEMO ? '<div class="aviso-demo">Modo demo: los datos son de ejemplo y se guardan solo en este celular. Contraseña del agente: demo1234.</div>' : '';
+  }
+  function htmlRedes(c) {
+    var nombre = marca(c);
+    var enlaces = REDES.filter(function (r) { return urlSegura(c[r[0]]); }).map(function (r) {
+      return '<a href="' + esc(urlSegura(c[r[0]])) + '" target="_blank" rel="noopener noreferrer" aria-label="' + esc(nombre) + ' en ' + r[1] + ' (se abre en una pestaña nueva)">' + ic(r[0], 20) + '</a>';
+    });
+    return enlaces.length ? '<div class="redes">' + enlaces.join('') + '</div>' : '';
   }
   function tarjetaPub(p) {
     var det = [];
@@ -447,10 +495,10 @@
         return '<button class="chip' + (f.tipo === t ? ' activo' : '') + '" data-tipo="' + t + '">' + (t ? t + 's' : 'Todas') + '</button>';
       }).join('');
       pintar('<div class="pantalla publica">' +
-        '<header class="portada"><div class="marca"><span class="marca-logo">' + ic('casa', 22) + '</span>' + esc(c.negocio) + '</div>' +
-        '<h1>Terrenos, casas y departamentos cerca de ti</h1><p>Mira las propiedades disponibles o deja tu pedido y te avisamos cuando aparezca lo que buscas.</p>' +
-        '<div class="acciones-pub"><a class="accion-pub" href="#/publicar">' + ic('megafono', 24) + '<strong>Publica tu propiedad gratis</strong><span>Para propietarios</span></a>' +
-        '<a class="accion-pub" href="#/busco">' + ic('lupa', 24) + '<strong>Cuéntanos qué buscas</strong><span>Te recomendamos opciones</span></a></div></header>' +
+        '<header class="portada"><p class="marca">' + esc(marca(c)) + '</p>' +
+        '<h1>Terrenos, casas y departamentos con asesoría de confianza</h1><p class="portada-texto">Mira las propiedades disponibles o cuéntanos qué buscas y te avisamos cuando aparezca.</p>' +
+        '<div class="acciones-pub"><a class="accion-pub" href="#/busco"><span class="accion-texto"><strong>Cuéntanos qué buscas</strong><span>Te recomendamos opciones al instante</span></span>' + ic('flecha', 20) + '</a>' +
+        '<a class="accion-pub" href="#/publicar"><span class="accion-texto"><strong>Publica tu propiedad gratis</strong><span>Para propietarios</span></span>' + ic('flecha', 20) + '</a></div></header>' +
         avisoDemo() +
         '<div class="seccion"><div class="seccion-cab"><h2>Propiedades disponibles</h2></div>' +
         '<div class="chips" role="group" aria-label="Operación">' + [['', 'Venta y alquiler'], ['Venta', 'En venta'], ['Alquiler', 'En alquiler']].map(function (o) {
@@ -461,7 +509,8 @@
         campo({ n: 'precioMax', l: 'Precio hasta (S/)', t: 'num', ph: 'Sin límite', req: true }, f.precioMax) + '</div>' +
         '<p class="contador">' + props.length + (props.length === 1 ? ' propiedad' : ' propiedades') + '</p>' +
         '<div class="lista-props">' + (props.length ? props.map(tarjetaPub).join('') : '<div class="vacio">No hay propiedades con esos filtros. <a href="#/busco">Cuéntanos qué buscas</a> y te avisamos.</div>') + '</div></div>' +
-        '<footer class="pie"><span>' + esc(c.negocio) + '</span><button data-agente>Acceso para el agente</button></footer></div>',
+        '<footer class="pie"><p class="pie-marca">' + esc(marca(c)) + '</p>' + htmlRedes(c) +
+        '<p class="pie-copy">© ' + new Date().getFullYear() + ' ' + esc(marca(c)) + '</p><button data-agente>Acceso para el agente</button></footer></div>',
         function (app) {
           app.querySelectorAll('[data-tipo]').forEach(function (b) { b.onclick = function () { f.tipo = b.dataset.tipo; vCatalogo(); }; });
           app.querySelectorAll('[data-op]').forEach(function (b) { b.onclick = function () { f.operacion = b.dataset.op; vCatalogo(); }; });
@@ -485,8 +534,8 @@
         (num(prop.Area) != null ? '<dt>Área</dt><dd>' + num(prop.Area) + ' m²</dd>' : '') +
         (num(prop.Dormitorios) != null ? '<dt>Dormitorios</dt><dd>' + num(prop.Dormitorios) + '</dd>' : '') + '</dl>' +
         (lista(prop.Caracteristicas).length ? '<div class="chips-lectura">' + lista(prop.Caracteristicas).map(function (x) { return '<span class="razon si">✓ ' + esc(x) + '</span>'; }).join('') + '</div>' : '') +
-        (prop.Descripcion ? '<p style="font-size:15px">' + esc(prop.Descripcion) + '</p>' : '') + '</div>' +
-        (wsp ? '<a class="btn verde ancho" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp') + 'Me interesa, escribir por WhatsApp</a>' : '') +
+        (prop.Descripcion ? '<p class="descripcion">' + esc(prop.Descripcion) + '</p>' : '') + '</div>' +
+        (wsp ? '<a class="btn primario ancho" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp') + 'Me interesa, escribir por WhatsApp</a>' : '') +
         '<a class="btn ancho" href="#/busco">Busco algo diferente</a></div>', function (a) { enlazarVolver(a, '#/'); });
     });
   }
@@ -495,12 +544,12 @@
     cargarPub(function () {
       var c = S.pub.config;
       pintar('<div class="pantalla publica">' + cabVolver('Publica tu propiedad') +
-        '<p style="color:var(--texto-2);font-size:15px">Es gratis. Revisamos los datos y la publicamos en el catálogo. Tu número no se muestra a los visitantes.</p>' +
+        '<p class="intro">Es gratis. Revisamos los datos y la publicamos en el catálogo. Tu número no se muestra a los visitantes.</p>' +
         '<form class="formulario" novalidate>' +
         '<div class="trampa" aria-hidden="true"><input name="web" tabindex="-1" autocomplete="off"></div>' +
         campo({ n: 'Nombre', l: 'Tu nombre', req: true, ph: 'María Quispe' }) + campo({ n: 'Celular', l: 'Tu celular', t: 'tel', req: true, ph: '984 123 456' }) +
         defsPropiedad(c).map(function (d) { return campo(d); }).join('') +
-        '<div class="acciones-form" style="display:flex;flex-direction:column;gap:10px"><button class="btn primario ancho" type="submit">Enviar mi propiedad</button></div></form></div>',
+        '<div class="acciones-form"><button class="btn primario ancho" type="submit">Enviar mi propiedad</button></div></form></div>',
         function (app) {
           enlazarVolver(app, '#/');
           var form = app.querySelector('form');
@@ -513,8 +562,8 @@
             api('publicarPropiedad', d).then(function (r) {
               cargando(false);
               if (!r.ok) return errorForm(form, r.error || 'No se pudo enviar. Inténtalo de nuevo.');
-              pintar('<div class="pantalla publica"><div class="exito"><span class="circulo">' + ic('check', 32) + '</span><h1 style="font-size:22px">Recibimos tu propiedad</h1>' +
-                '<p style="color:var(--texto-2)">Te escribiremos al ' + esc(d.Celular) + ' para confirmar los datos antes de publicarla.</p></div><a class="btn ancho" href="#/">Volver al catálogo</a></div>');
+              pintar('<div class="pantalla publica"><div class="exito"><span class="circulo">' + ic('check', 32) + '</span><h1>Recibimos tu propiedad</h1>' +
+                '<p class="intro">Te escribiremos al ' + esc(d.Celular) + ' para confirmar los datos antes de publicarla.</p></div><a class="btn ancho" href="#/">Volver al catálogo</a></div>');
             });
           };
         });
@@ -525,14 +574,14 @@
     cargarPub(function () {
       var c = S.pub.config;
       pintar('<div class="pantalla publica">' + cabVolver('¿Qué estás buscando?') +
-        '<p style="color:var(--texto-2);font-size:15px">Completa lo que sepas; puedes dejar campos vacíos. Te mostramos al instante las propiedades que coinciden.</p>' +
+        '<p class="intro">Completa lo que sepas; puedes dejar campos vacíos. Te mostramos al instante las propiedades que coinciden.</p>' +
         '<form class="formulario" novalidate><div class="trampa" aria-hidden="true"><input name="web" tabindex="-1" autocomplete="off"></div>' +
         defsInteresado(c).map(function (d) {
           if (d.n === 'Nombre') d = { n: 'Nombre', l: 'Tu nombre', req: true, ph: 'Juan Pérez' };
           if (d.n === 'Celular') d = { n: 'Celular', l: 'Tu celular', t: 'tel', req: true, ph: '987 654 321' };
           return campo(d);
         }).join('') +
-        '<div class="acciones-form" style="display:flex;flex-direction:column;gap:10px"><button class="btn primario ancho" type="submit">Ver propiedades para mí</button></div></form></div>',
+        '<div class="acciones-form"><button class="btn primario ancho" type="submit">Ver propiedades para mí</button></div></form></div>',
         function (app) {
           enlazarVolver(app, '#/');
           var form = app.querySelector('form');
@@ -545,8 +594,8 @@
               cargando(false);
               if (!r.ok) return errorForm(form, r.error || 'No se pudo enviar. Inténtalo de nuevo.');
               var recos = recomendarPara(d, S.pub.Propiedades);
-              pintar('<div class="pantalla publica"><div class="exito"><span class="circulo">' + ic('check', 32) + '</span><h1 style="font-size:22px">Listo, ' + esc(d.Nombre.split(' ')[0]) + '</h1>' +
-                '<p style="color:var(--texto-2)">Guardamos lo que buscas. Si aparece algo nuevo, te escribimos.</p></div>' +
+              pintar('<div class="pantalla publica"><div class="exito"><span class="circulo">' + ic('check', 32) + '</span><h1>Listo, ' + esc(d.Nombre.split(' ')[0]) + '</h1>' +
+                '<p class="intro">Guardamos lo que buscas. Si aparece algo nuevo, te escribimos.</p></div>' +
                 '<div class="seccion"><div class="seccion-cab"><h2>' + (recos.length ? 'Opciones para ti ahora' : 'Aún no hay opciones que coincidan') + '</h2></div>' +
                 (recos.length ? recos.map(function (x) {
                   return '<div class="reco"><a class="reco-cab" href="#/p/' + esc(x.p.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(x.p.Tipo + (x.p.Zona ? ' en ' + x.p.Zona : '')) + '</span><span class="precio">' + (dinero(x.p.Precio) || 'Precio a consultar') + '</span></div></a>' + htmlRazones(x.m.razones) + '</div>';
@@ -560,23 +609,25 @@
 
   function vLogin() {
     pintar('<div class="pantalla publica">' + cabVolver('Acceso del agente') + avisoDemo() +
-      '<form class="formulario" novalidate>' + campo({ n: 'pin', l: 'PIN', t: 'password', req: true, ph: '••••' }) +
-      '<div class="acciones-form" style="display:flex;flex-direction:column;gap:10px"><button class="btn primario ancho" type="submit">Entrar</button></div></form></div>',
+      '<p class="intro">Ingresa tu contraseña para ver tus contactos, propiedades y citas.</p>' +
+      '<form class="formulario" novalidate>' + campoClave('password', 'Contraseña', 'current-password') +
+      '<div class="acciones-form"><button class="btn primario ancho" type="submit">Entrar</button></div></form></div>',
       function (app) {
         enlazarVolver(app, '#/');
+        enlazarVerClave(app);
         var form = app.querySelector('form');
-        var inp = app.querySelector('#f_pin');
-        inp.setAttribute('inputmode', 'numeric'); inp.setAttribute('autocomplete', 'current-password'); inp.focus();
+        var inp = app.querySelector('#f_password');
+        inp.focus();
         form.onsubmit = function (e) {
           e.preventDefault();
-          var pin = inp.value.trim();
-          if (!pin) return errorForm(form, 'Escribe tu PIN.');
-          S.pin = pin;
+          var clave = inp.value;
+          if (!clave) return errorForm(form, 'Escribe tu contraseña.');
           cargando(true);
-          api('login').then(function (r) {
+          api('login', { password: clave }).then(function (r) {
             cargando(false);
-            if (!r.ok) { S.pin = ''; return errorForm(form, r.error || 'PIN incorrecto.'); }
-            guardarLocal('inmo_pin', pin);
+            if (!r.ok || !r.data || !r.data.token) { inp.value = ''; inp.focus(); return errorForm(form, r.error || 'No se pudo iniciar sesión.'); }
+            S.token = r.data.token;
+            guardarLocal('inmo_token', S.token);
             S.db = null;
             ir('#/a/inicio');
           });
@@ -591,7 +642,7 @@
     var tel = int && telLink(int.Celular);
     return '<div class="item"><a href="#/a/cita/' + esc(c.ID) + '" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;text-decoration:none;color:inherit">' +
       '<span class="hora">' + esc(c.Hora || '—') + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(int ? int.Nombre : 'Sin interesado') +
-      (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado ' + esc(c.Estado) + '" style="font-size:12px">' + esc(c.Estado) + '</span>' : '') + '</div><div class="item-sub">' + esc(resumenProp(p)) + '</div></div></a>' +
+      (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado chico ' + esc(c.Estado) + '">' + esc(c.Estado) + '</span>' : '') + '</div><div class="item-sub">' + esc(resumenProp(p)) + '</div></div></a>' +
       (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar a ' + esc(int.Nombre) + '">' + ic('tel', 20) + '</a>' : '') + '</div>';
   }
 
@@ -640,12 +691,46 @@
       '<div class="seccion"><div class="seccion-cab"><h2>Llamadas pendientes</h2><a class="ver-todo" href="#/a/llamadas">Ver todo</a></div>' +
       (pend.length ? '<div class="lista">' + pend.slice(0, 6).map(itemLlamada).join('') + '</div>' : '<div class="vacio">No tienes llamadas pendientes para hoy.</div>') + '</div>' +
       '<div class="menu-agente"><a class="btn ancho" href="#/" data-catalogo>' + ic('edificio', 20) + 'Ver mi catálogo público</a>' +
+      '<a class="btn ancho" href="#/a/cambiar-contrasena">' + ic('candado', 20) + 'Cambiar contraseña</a>' +
       '<div class="fila-btns"><button class="btn chico" data-recargar>' + ic('recargar', 18) + 'Actualizar datos</button><button class="btn chico peligro" data-salir>' + ic('salir', 18) + 'Cerrar sesión</button></div></div>' +
       '</div>' + nav('inicio'), function (app) {
         enlazarChecks(app, VISTAS.inicio);
         app.querySelector('[data-catalogo]').onclick = function (e) { e.preventDefault(); S.pub = null; location.hash = '#/catalogo'; };
         app.querySelector('[data-recargar]').onclick = function () { S.pub = null; cargarDb(true); toast('Actualizando…'); };
         app.querySelector('[data-salir]').onclick = function () { if (confirm('¿Cerrar sesión en este celular?')) salirAgente(); };
+      });
+  };
+
+  VISTAS['cambiar-contrasena'] = function () {
+    pintar('<div class="pantalla">' + cabVolver('Cambiar contraseña') +
+      '<p class="intro">Usa al menos ' + MIN_CONTRASENA + ' caracteres. Puedes combinar letras, números y símbolos. Al cambiarla se cerrará la sesión en tus otros dispositivos.</p>' +
+      '<form class="formulario" novalidate>' + campoClave('actual', 'Contraseña actual', 'current-password') +
+      campoClave('nueva', 'Nueva contraseña', 'new-password') + campoClave('repetir', 'Repite la nueva contraseña', 'new-password') +
+      '<div class="acciones-form"><button class="btn primario ancho" type="submit">Guardar nueva contraseña</button></div></form></div>' + nav('inicio'), function (app) {
+        enlazarVolver(app);
+        enlazarVerClave(app);
+        var form = app.querySelector('form');
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var actual = form.actual.value, nueva = form.nueva.value, repetir = form.repetir.value;
+          if (!actual) return errorForm(form, 'Escribe tu contraseña actual.');
+          if (nueva.length < MIN_CONTRASENA) return errorForm(form, 'La nueva contraseña debe tener al menos ' + MIN_CONTRASENA + ' caracteres.');
+          if (nueva !== repetir) return errorForm(form, 'Las dos contraseñas nuevas no coinciden.');
+          if (nueva === actual) return errorForm(form, 'La nueva contraseña debe ser distinta de la actual.');
+          cargando(true);
+          api('cambiarContrasena', { actual: actual, nueva: nueva }).then(function (r) {
+            cargando(false);
+            if (r.auth === false) return;
+            if (!r.ok || !r.data || !r.data.token) {
+              form.actual.value = ''; form.actual.focus();
+              return errorForm(form, r.error || 'No se pudo cambiar la contraseña.');
+            }
+            S.token = r.data.token;
+            guardarLocal('inmo_token', S.token);
+            toast('Contraseña cambiada');
+            ir('#/a/inicio');
+          });
+        };
       });
   };
 
@@ -728,7 +813,7 @@
       var citas = T('Citas').filter(function (x) { return x.ID_Interesado === c.ID; }).sort(ordenarCitas);
       if (citas.length) extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus citas</h2></div><div class="lista">' + citas.map(function (x) {
         var pp = buscarId('Propiedades', x.ID_Propiedad);
-        return '<a class="item" href="#/a/cita/' + esc(x.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(fechaCorta(x.Fecha) + (x.Hora ? ' · ' + x.Hora : '')) + ' <span class="estado ' + esc(x.Estado) + '" style="font-size:12px">' + esc(x.Estado || '') + '</span></div><div class="item-sub">' + esc(resumenProp(pp)) + '</div></div></a>';
+        return '<a class="item" href="#/a/cita/' + esc(x.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(fechaCorta(x.Fecha) + (x.Hora ? ' · ' + x.Hora : '')) + ' <span class="estado chico ' + esc(x.Estado) + '">' + esc(x.Estado || '') + '</span></div><div class="item-sub">' + esc(resumenProp(pp)) + '</div></div></a>';
       }).join('') + '</div></div>';
     }
     if (tipo === 'propietario') {
@@ -809,12 +894,12 @@
     var nFiltros = ['estado', 'operacion', 'zona', 'precioMax'].filter(function (k) { return f[k]; }).length;
     pintar('<div class="pantalla"><div class="cab"><h1>Propiedades</h1><a class="btn-redondo" href="#/a/propiedad-form" aria-label="Agregar propiedad">' + ic('mas', 26) + '</a></div>' +
       '<div class="buscador"><div class="caja-busqueda">' + ic('buscar', 20) + '<input id="qp" type="search" placeholder="Zona, dirección o propietario" aria-label="Buscar propiedad" value="' + esc(f.q) + '"></div>' +
-      '<button class="btn chico" style="min-height:48px" data-filtros aria-expanded="' + f.abierto + '">' + ic('filtro', 18) + 'Filtros' + (nFiltros ? ' (' + nFiltros + ')' : '') + '</button></div>' +
+      '<button class="btn chico" data-filtros aria-expanded="' + f.abierto + '">' + ic('filtro', 18) + 'Filtros' + (nFiltros ? ' (' + nFiltros + ')' : '') + '</button></div>' +
       (f.abierto ? '<div class="panel-filtros">' + campo({ n: 'estado', l: 'Estado', t: 'select', op: ESTADOS_PROP, vacio: 'Todos', req: true }, f.estado) +
         campo({ n: 'operacion', l: 'Operación', t: 'select', op: OPERACIONES, vacio: 'Todas', req: true }, f.operacion) +
         campo({ n: 'zona', l: 'Zona', t: 'select', op: cf.zonas, vacio: 'Todas', req: true }, f.zona) +
         campo({ n: 'precioMax', l: 'Precio hasta', t: 'num', ph: 'S/', req: true }, f.precioMax) +
-        '<button class="btn chico" data-limpiar style="grid-column:1/-1">Limpiar filtros</button></div>' : '') +
+        '<button class="btn chico ocupa-todo" data-limpiar>Limpiar filtros</button></div>' : '') +
       '<div class="chips" role="group" aria-label="Tipo">' + [''].concat(TIPOS).map(function (t) {
         return '<button class="chip' + (f.tipo === t ? ' activo' : '') + '" data-tipo="' + t + '">' + (t ? t + 's' : 'Todas') + '</button>';
       }).join('') + '</div>' +
@@ -928,7 +1013,7 @@
       (pasadas.length ? '<button class="btn ancho" data-pasadas>' + (S.verPasadas ? 'Ocultar citas pasadas' : 'Ver citas pasadas (' + pasadas.length + ')') + '</button>' +
         (S.verPasadas ? '<div class="lista">' + pasadas.map(function (c) {
           var i = buscarId('Interesados', c.ID_Interesado), pp = buscarId('Propiedades', c.ID_Propiedad);
-          return '<a class="item" href="#/a/cita/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc((i ? i.Nombre : 'Sin interesado')) + ' <span class="estado ' + esc(c.Estado) + '" style="font-size:12px">' + esc(c.Estado || '') + '</span></div><div class="item-sub">' + esc(fechaCorta(c.Fecha) + ' · ' + resumenProp(pp)) + '</div></div></a>';
+          return '<a class="item" href="#/a/cita/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc((i ? i.Nombre : 'Sin interesado')) + ' <span class="estado chico ' + esc(c.Estado) + '">' + esc(c.Estado || '') + '</span></div><div class="item-sub">' + esc(fechaCorta(c.Fecha) + ' · ' + resumenProp(pp)) + '</div></div></a>';
         }).join('') + '</div>' : '') : '') +
       '</div>' + nav('citas'), function (app) {
         var b = app.querySelector('[data-pasadas]');
@@ -943,8 +1028,8 @@
     function resumen(idp, idi) {
       var p = buscarId('Propiedades', idp), i = buscarId('Interesados', idi), d = p && buscarId('Propietarios', p.ID_Propietario);
       if (!p && !i) return '';
-      return '<div class="ficha" style="gap:6px">' + (i ? '<p class="item-sub">Interesado: <strong>' + esc(i.Nombre) + '</strong>' + (i.Celular ? ' · ' + esc(i.Celular) : '') + '</p>' : '') +
-        (p ? '<p style="font-weight:700">' + esc(resumenProp(p)) + (p.Precio ? ' · ' + dinero(p.Precio) : '') + '</p><p class="item-sub">Propietario: ' + esc(d ? d.Nombre + (d.Celular ? ' · ' + d.Celular : '') : '—') + '</p><p class="item-sub">Dirección: ' + esc(p.Direccion || '—') + '</p>' : '') + '</div>';
+      return '<div class="ficha compacta">' + (i ? '<p class="item-sub">Interesado: <strong>' + esc(i.Nombre) + '</strong>' + (i.Celular ? ' · ' + esc(i.Celular) : '') + '</p>' : '') +
+        (p ? '<p class="resaltado">' + esc(resumenProp(p)) + (p.Precio ? ' · ' + dinero(p.Precio) : '') + '</p><p class="item-sub">Propietario: ' + esc(d ? d.Nombre + (d.Celular ? ' · ' + d.Celular : '') : '—') + '</p><p class="item-sub">Dirección: ' + esc(p.Direccion || '—') + '</p>' : '') + '</div>';
     }
     pintar('<div class="pantalla">' + cabVolver(c ? 'Cita' : 'Nueva cita') +
       '<form class="formulario" novalidate>' +
@@ -1047,12 +1132,24 @@
   /* ================= Modo demo (sin servidor) ================= */
 
   var Demo = {
+    CONTRASENA: 'demo1234',
+    REDES: { FACEBOOK: 'https://web.facebook.com/alquis.group', TIKTOK: 'https://www.tiktok.com/@alquis_group', INSTAGRAM: 'https://www.instagram.com/grupoalquis/' },
     cargar: function () {
       var db = leerJSON('inmo_demo_db');
-      if (db) return db;
+      if (db) {
+        // Datos demo de la versión anterior: quita el PIN y agrega lo nuevo.
+        if (!db.Sesiones || db.Config.PIN || !('FACEBOOK' in db.Config)) {
+          delete db.Config.PIN;
+          Object.keys(Demo.REDES).forEach(function (k) { if (!(k in db.Config)) db.Config[k] = Demo.REDES[k]; });
+          db.Sesiones = db.Sesiones || {};
+          Demo.guardar(db);
+        }
+        return db;
+      }
       var h = hoy(), d = function (n) { return sumarDias(h, n); };
       db = {
-        Config: { PIN: '1234', NOMBRE_NEGOCIO: 'Mi Inmobiliaria', WHATSAPP: '51999999999', ZONAS: 'San Jerónimo, San Sebastián, Wanchaq, Santiago, Cusco Centro', CARACTERISTICAS: 'Con título, Agua, Luz, Desagüe, Pista asfaltada, Cochera, Jardín', CATEGORIAS_OTROS: 'Notario, Municipalidad, Topógrafo, Banco, Abogado, Otro agente, Otro' },
+        Config: Object.assign({ NOMBRE_NEGOCIO: MARCA, WHATSAPP: '51999999999', ZONAS: 'San Jerónimo, San Sebastián, Wanchaq, Santiago, Cusco Centro', CARACTERISTICAS: 'Con título, Agua, Luz, Desagüe, Pista asfaltada, Cochera, Jardín', CATEGORIAS_OTROS: 'Notario, Municipalidad, Topógrafo, Banco, Abogado, Otro agente, Otro' }, Demo.REDES),
+        Sesiones: {},
         Propietarios: [
           { ID: 'PRO-0001', Nombre: 'María Quispe', Celular: '984123456', Notas: '', Origen: 'Agente', FechaRegistro: d(-20) },
           { ID: 'PRO-0002', Nombre: 'Pedro Ccahua', Celular: '974555210', Notas: '', Origen: 'Agente', FechaRegistro: d(-15) },
@@ -1097,7 +1194,18 @@
     guardar: function (db) { guardarLocal('inmo_demo_db', JSON.stringify(db)); },
     prefijos: { Propietarios: 'PRO', Interesados: 'INT', OtrosContactos: 'OTR', Propiedades: 'PRP', Citas: 'CIT', Llamadas: 'LLA' },
     config: function (c) {
-      return { negocio: c.NOMBRE_NEGOCIO, whatsapp: c.WHATSAPP, zonas: lista(c.ZONAS), caracteristicas: lista(c.CARACTERISTICAS), categoriasOtros: lista(c.CATEGORIAS_OTROS) };
+      return { negocio: c.NOMBRE_NEGOCIO, whatsapp: c.WHATSAPP, facebook: urlSegura(c.FACEBOOK), tiktok: urlSegura(c.TIKTOK), instagram: urlSegura(c.INSTAGRAM), zonas: lista(c.ZONAS), caracteristicas: lista(c.CARACTERISTICAS), categoriasOtros: lista(c.CATEGORIAS_OTROS) };
+    },
+    token: function () {
+      var b = new Uint8Array(32);
+      (window.crypto || window.msCrypto).getRandomValues(b);
+      return Array.prototype.map.call(b, function (x) { return (x + 0x100).toString(16).slice(1); }).join('');
+    },
+    sesion: function (db) {
+      var t = Demo.token();
+      db.Sesiones[t] = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      Demo.guardar(db);
+      return { ok: true, data: { token: t, vence: db.Sesiones[t] } };
     },
     insertar: function (db, tabla, reg) {
       var pre = Demo.prefijos[tabla], arr = db[tabla], i = -1;
@@ -1120,8 +1228,13 @@
         var r = {}; ['Nombre', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (k) { r[k] = d[k] || ''; });
         r.Origen = 'App'; Demo.insertar(db, 'Interesados', r); return { ok: true };
       }
-      if (String(req.pin) !== db.Config.PIN) return { ok: false, error: 'PIN incorrecto.', auth: false };
-      if (a === 'login') return { ok: true };
+      if (a === 'login') return d.password === Demo.CONTRASENA ? Demo.sesion(db) : { ok: false, error: 'Contraseña incorrecta. En el modo demo es demo1234.' };
+      if (a === 'logout') { delete db.Sesiones[req.token]; Demo.guardar(db); return { ok: true }; }
+      if (!req.token || !(db.Sesiones[req.token] > Date.now())) return { ok: false, error: 'Tu sesión venció o se cerró. Vuelve a ingresar.', auth: false };
+      if (a === 'cambiarContrasena') {
+        if (d.actual !== Demo.CONTRASENA) return { ok: false, error: 'La contraseña actual no es correcta.' };
+        return { ok: false, error: 'En el modo demo la contraseña es siempre demo1234. Podrás cambiarla cuando conectes tu hoja de Google.' };
+      }
       if (a === 'todo') {
         var o = { config: Demo.config(db.Config) };
         Object.keys(Demo.prefijos).forEach(function (t) { o[t] = db[t].map(function (x) { return Object.assign({}, x); }); });
@@ -1140,6 +1253,7 @@
 
   /* ================= Inicio ================= */
 
+  guardarLocal('inmo_pin', null); // la versión anterior guardaba el PIN aquí
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(function () {});
   }
