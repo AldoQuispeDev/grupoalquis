@@ -1,0 +1,1148 @@
+/* App Inmobiliaria — lógica del celular (JavaScript sin frameworks) */
+(function () {
+  'use strict';
+
+  var CFG = window.APP_CONFIG || {};
+  var DEMO = !CFG.API_URL;
+  var TIPOS = ['Terreno', 'Casa', 'Departamento', 'Local'];
+  var OPERACIONES = ['Venta', 'Alquiler'];
+  var ESTADOS_PROP = ['Disponible', 'Pendiente', 'Reservado', 'Vendido', 'Alquilado'];
+  var ESTADOS_CITA = ['Pendiente', 'Realizada', 'Cancelada'];
+  var TABLA_DE = { propietario: 'Propietarios', interesado: 'Interesados', otro: 'OtrosContactos' };
+  var NOMBRE_TIPO = { propietario: 'Propietario', interesado: 'Interesado', otro: 'Otro' };
+
+  var S = {
+    pin: leerLocal('inmo_pin') || '',
+    db: leerJSON('inmo_cache'),
+    pub: null,
+    cargandoDb: false,
+    filtrosProp: { q: '', tipo: '', estado: '', operacion: '', zona: '', precioMax: '', abierto: false },
+    filtrosPub: { operacion: '', tipo: '', zona: '', precioMax: '' },
+    tabContactos: 'interesado',
+    qContactos: '',
+    verPasadas: false,
+    verHechas: false
+  };
+
+  /* ================= Utilidades ================= */
+
+  function leerLocal(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function guardarLocal(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} }
+  function leerJSON(k) { try { return JSON.parse(leerLocal(k) || 'null'); } catch (e) { return null; } }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function num(v) {
+    var n = parseFloat(String(v == null ? '' : v).replace(/[^\d.]/g, ''));
+    return isNaN(n) ? null : n;
+  }
+  function dinero(v) {
+    var n = num(v);
+    if (n == null) return '';
+    return 'S/ ' + Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  }
+  function lista(t) { return String(t || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean); }
+  function iniciales(n) {
+    var p = String(n || '?').trim().split(/\s+/);
+    return ((p[0] || '?')[0] + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase();
+  }
+  function soloDigitos(t) { return String(t || '').replace(/\D/g, ''); }
+  function telLink(cel) { var d = soloDigitos(cel); return d ? 'tel:' + d : ''; }
+  function wspLink(cel, texto) {
+    var d = soloDigitos(cel);
+    if (!d) return '';
+    if (d.length === 9) d = '51' + d;
+    return 'https://wa.me/' + d + (texto ? '?text=' + encodeURIComponent(texto) : '');
+  }
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function isoFecha(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+  function hoy() { return isoFecha(new Date()); }
+  function sumarDias(iso, n) { var d = aFecha(iso); d.setDate(d.getDate() + n); return isoFecha(d); }
+  function aFecha(iso) { var p = String(iso).split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+  var DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+  var MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  function mayus(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+  function fechaLarga(iso) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(iso))) return iso || '';
+    var d = aFecha(iso);
+    return mayus(DIAS[d.getDay()]) + ' ' + d.getDate() + ' de ' + MESES[d.getMonth()];
+  }
+  function fechaCorta(iso) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(iso))) return iso || 'Sin fecha';
+    if (iso === hoy()) return 'Hoy';
+    if (iso === sumarDias(hoy(), 1)) return 'Mañana';
+    var d = aFecha(iso);
+    return mayus(DIAS[d.getDay()].slice(0, 3)) + ' ' + d.getDate() + ' ' + MESES[d.getMonth()].slice(0, 3);
+  }
+  function saludo() {
+    var h = new Date().getHours();
+    return h < 12 ? 'Buenos días' : (h < 19 ? 'Buenas tardes' : 'Buenas noches');
+  }
+
+  function toast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('ver');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { t.classList.remove('ver'); }, 2400);
+  }
+  function cargando(si) { document.getElementById('cargando').hidden = !si; }
+
+  /* ================= Íconos ================= */
+
+  var IC = {
+    mas: '<path d="M12 5v14M5 12h14"/>',
+    atras: '<path d="M15 5l-7 7 7 7"/>',
+    tel: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/>',
+    wsp: '<path d="M4 20l1.3-3.9A8 8 0 1 1 8 19z"/><path d="M9 9.5c.3 1.8 1.7 3.3 3.5 4l1.2-1.2 2 1-.4 1.5c-3.3.2-6.4-2.8-6.3-6.1L10.5 8l1 2z"/>',
+    lapiz: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
+    buscar: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+    filtro: '<path d="M4 6h16M7 12h10M10 18h4"/>',
+    casa: '<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+    gente: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5a6 6 0 0 1 3.5 5.5"/>',
+    edificio: '<path d="M4 21V8l8-5 8 5v13M9 21v-6h6v6M3 21h18"/>',
+    cal: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    terreno: '<path d="M3 18l5-9 4 6 3-4 6 7z"/><path d="M3 21h18"/>',
+    depto: '<rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/>',
+    local: '<path d="M4 9l1.5-5h13L20 9M4 9h16v11H4zM4 9a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M10 20v-5h4v5"/>',
+    estrella: '<path d="M12 4l2.4 5 5.4.6-4 3.7 1.1 5.3L12 16l-4.9 2.6 1.1-5.3-4-3.7 5.4-.6z"/>',
+    megafono: '<path d="M4 10v4h3l7 4V6L7 10zM17 9a4 4 0 0 1 0 6"/>',
+    lupa: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5"/>',
+    salir: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l-4-4 4-4M6 12h10"/>',
+    recargar: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
+    llamadas: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/><path d="M15 3.5a5.5 5.5 0 0 1 5.5 5.5"/>'
+  };
+  function ic(n, t) {
+    t = t || 22;
+    return '<svg width="' + t + '" height="' + t + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + IC[n] + '</svg>';
+  }
+  function icTipo(tipo) {
+    var n = { Terreno: 'terreno', Casa: 'casa', Departamento: 'depto', Local: 'local' }[tipo] || 'edificio';
+    return '<span class="tipo-icono">' + ic(n, 26) + '</span>';
+  }
+
+  /* ================= Coincidencias (recomendaciones) ================= */
+
+  function coincidencia(int, p) {
+    var razones = [], gan = 0, pos = 0;
+    function crit(peso, estado, texto) {
+      pos += peso;
+      if (estado === 'si') gan += peso;
+      else if (estado === 'medio') gan += peso / 2;
+      razones.push({ e: estado, t: texto });
+    }
+    if (int.Operacion) {
+      if (p.Operacion && p.Operacion !== int.Operacion) return null;
+      crit(10, p.Operacion ? 'si' : '?', p.Operacion ? p.Operacion : 'Operación sin dato');
+    }
+    if (int.Tipo) {
+      if (p.Tipo && p.Tipo !== int.Tipo) return null;
+      crit(20, p.Tipo ? 'si' : '?', p.Tipo || 'Tipo sin dato');
+    }
+    var zonas = lista(int.Zonas);
+    if (zonas.length) {
+      if (!p.Zona) crit(25, '?', 'Zona sin dato');
+      else crit(25, zonas.indexOf(p.Zona) >= 0 ? 'si' : 'no', p.Zona);
+    }
+    var pres = num(int.PresupuestoMax), precio = num(p.Precio);
+    if (pres != null) {
+      if (precio == null) crit(25, '?', 'Precio sin dato');
+      else if (precio <= pres) crit(25, 'si', 'Dentro del presupuesto');
+      else if (precio <= pres * 1.1) crit(25, 'medio', 'Un poco sobre el presupuesto');
+      else return null;
+    }
+    var amin = num(int.AreaMin), area = num(p.Area);
+    if (amin != null) {
+      if (area == null) crit(10, '?', 'Área sin dato');
+      else crit(10, area >= amin ? 'si' : 'no', area + ' m²');
+    }
+    var dmin = num(int.DormitoriosMin), dorm = num(p.Dormitorios);
+    if (dmin != null) {
+      if (dorm == null) crit(5, '?', 'Dormitorios sin dato');
+      else crit(5, dorm >= dmin ? 'si' : 'no', dorm + ' dorm.');
+    }
+    var desea = lista(int.Caracteristicas), tiene = lista(p.Caracteristicas);
+    if (desea.length) {
+      var peso = 15 / desea.length;
+      desea.forEach(function (c) { crit(peso, tiene.indexOf(c) >= 0 ? 'si' : 'no', c); });
+    }
+    return { puntaje: pos ? Math.round(gan / pos * 100) : null, razones: razones };
+  }
+
+  function recomendarPara(int, props) {
+    return props.filter(function (p) { return p.Estado === 'Disponible' || p.Estado === undefined; })
+      .map(function (p) { var m = coincidencia(int, p); return m ? { p: p, m: m } : null; })
+      .filter(function (x) { return x && (x.m.puntaje == null || x.m.puntaje >= 40); })
+      .sort(function (a, b) { return (b.m.puntaje || 0) - (a.m.puntaje || 0); });
+  }
+
+  function interesadosPara(p, ints) {
+    return ints.map(function (i) { var m = coincidencia(i, p); return m ? { i: i, m: m } : null; })
+      .filter(function (x) { return x && x.m.puntaje != null && x.m.puntaje >= 40; })
+      .sort(function (a, b) { return b.m.puntaje - a.m.puntaje; });
+  }
+
+  function htmlRazones(rs) {
+    return '<div class="razones">' + rs.map(function (r) {
+      var c = r.e === 'si' ? 'si' : (r.e === 'no' ? 'no' : (r.e === 'medio' ? 'medio' : ''));
+      var s = r.e === 'si' ? '✓ ' : (r.e === 'no' ? '✗ ' : (r.e === 'medio' ? '≈ ' : '? '));
+      return '<span class="razon ' + c + '">' + s + esc(r.t) + '</span>';
+    }).join('') + '</div>';
+  }
+  function htmlPuntaje(m) {
+    if (m.puntaje == null) return '<span class="puntaje medio"><small>Sin</small><small>criterios</small></span>';
+    return '<span class="puntaje' + (m.puntaje < 70 ? ' medio' : '') + '">' + m.puntaje + '<small>%</small></span>';
+  }
+
+  /* ================= Conexión con el servidor ================= */
+
+  function api(accion, data) {
+    if (DEMO) return Promise.resolve(Demo.manejar({ action: accion, pin: S.pin, data: data }));
+    return fetch(CFG.API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: accion, pin: S.pin, data: data || {} })
+    }).then(function (r) { return r.json(); }).catch(function () {
+      return { ok: false, error: 'Sin conexión. Revisa tu internet e inténtalo de nuevo.' };
+    });
+  }
+
+  function cargarDb(forzar) {
+    if (S.cargandoDb) return;
+    if (S.db && !forzar && S.db._t && Date.now() - S.db._t < 30000) return;
+    S.cargandoDb = true;
+    api('todo').then(function (r) {
+      S.cargandoDb = false;
+      if (r.ok) {
+        S.db = r.data; S.db._t = Date.now();
+        guardarLocal('inmo_cache', JSON.stringify(S.db));
+        render();
+      } else if (r.auth === false) {
+        salirAgente(); toast('Tu PIN cambió. Vuelve a ingresar.');
+      } else if (!S.db) {
+        toast(r.error || 'No se pudieron cargar los datos.');
+      }
+    });
+  }
+
+  function guardarRegistro(tabla, registro) {
+    cargando(true);
+    return api('guardar', { tabla: tabla, registro: registro }).then(function (r) {
+      cargando(false);
+      if (!r.ok) { toast(r.error || 'No se pudo guardar.'); throw new Error(r.error); }
+      var arr = S.db[tabla] || (S.db[tabla] = []);
+      var i = arr.findIndex(function (x) { return x.ID === r.data.ID; });
+      if (i >= 0) arr[i] = r.data; else arr.push(r.data);
+      guardarLocal('inmo_cache', JSON.stringify(S.db));
+      return r.data;
+    });
+  }
+
+  function eliminarRegistro(tabla, id) {
+    cargando(true);
+    return api('eliminar', { tabla: tabla, id: id }).then(function (r) {
+      cargando(false);
+      if (!r.ok) { toast(r.error || 'No se pudo eliminar.'); throw new Error(r.error); }
+      S.db[tabla] = (S.db[tabla] || []).filter(function (x) { return x.ID !== id; });
+      guardarLocal('inmo_cache', JSON.stringify(S.db));
+    });
+  }
+
+  function salirAgente() {
+    S.pin = ''; S.db = null;
+    guardarLocal('inmo_pin', null); guardarLocal('inmo_cache', null);
+    ir('#/');
+  }
+
+  /* ================= Acceso a datos ================= */
+
+  function T(n) { return (S.db && S.db[n]) || []; }
+  function buscarId(tabla, id) { return T(tabla).find(function (x) { return x.ID === id; }); }
+  function conf() { return (S.db && S.db.config) || (S.pub && S.pub.config) || { zonas: [], caracteristicas: [], categoriasOtros: [] }; }
+  function contacto(tipo, id) { return buscarId(TABLA_DE[tipo] || '', id); }
+  function tipoDeLlamada(l) { return { Interesado: 'interesado', Propietario: 'propietario', Otro: 'otro' }[l.TipoContacto] || 'otro'; }
+  function resumenProp(p) {
+    if (!p) return 'Sin propiedad';
+    var partes = [p.Tipo];
+    if (num(p.Area) != null) partes[0] += ' ' + num(p.Area) + ' m²';
+    else if (num(p.Dormitorios) != null) partes[0] += ' ' + num(p.Dormitorios) + ' dorm.';
+    if (p.Zona) partes.push(p.Zona);
+    return partes.join(' · ');
+  }
+  function citasActivas() { return T('Citas').filter(function (c) { return c.Estado !== 'Cancelada'; }); }
+  function llamadasPendientes() { return T('Llamadas').filter(function (l) { return l.Estado !== 'Hecha'; }); }
+  function ordenarCitas(a, b) { return (a.Fecha + (a.Hora || '99')).localeCompare(b.Fecha + (b.Hora || '99')); }
+
+  /* ================= Router ================= */
+
+  function ir(h) { if (location.hash === h) render(); else location.hash = h; }
+  function ruta() {
+    var h = location.hash.replace(/^#/, '') || '/';
+    var q = {};
+    var i = h.indexOf('?');
+    if (i >= 0) {
+      h.slice(i + 1).split('&').forEach(function (kv) { var p = kv.split('='); if (p[0]) q[p[0]] = decodeURIComponent(p[1] || ''); });
+      h = h.slice(0, i);
+    }
+    return { partes: h.split('/').filter(Boolean), q: q };
+  }
+
+  var VISTAS = {};
+  function render() {
+    var r = ruta();
+    var p = r.partes;
+    if (p[0] === 'a') {
+      if (!S.pin) return ir('#/agente');
+      if (!S.db) { pintar('<div class="pantalla"><div class="vacio">Cargando tus datos…</div></div>'); cargarDb(true); return; }
+      cargarDb(false);
+      var v = VISTAS[p[1]] || VISTAS.inicio;
+      return v(p.slice(2), r.q);
+    }
+    if ((!p.length || p[0] === 'agente') && S.pin) return ir('#/a/inicio');
+    var vp = { agente: vLogin, publicar: vPublicar, busco: vBusco, p: vDetallePub }[p[0]] || vCatalogo;
+    vp(p.slice(1), r.q);
+  }
+  function pintar(html, alMontar) {
+    var app = document.getElementById('app');
+    app.innerHTML = html;
+    window.scrollTo(0, 0);
+    if (alMontar) alMontar(app);
+  }
+  window.addEventListener('hashchange', render);
+
+  function nav(activo) {
+    var it = [['inicio', 'casa', 'Inicio'], ['contactos', 'gente', 'Contactos'], ['propiedades', 'edificio', 'Propiedades'], ['citas', 'cal', 'Citas']];
+    return '<nav class="nav" aria-label="Secciones"><div class="nav-interna">' + it.map(function (x) {
+      return '<a href="#/a/' + x[0] + '"' + (x[0] === activo ? ' class="activo" aria-current="page"' : '') + '>' + ic(x[1], 24) + x[2] + '</a>';
+    }).join('') + '</div></nav>';
+  }
+  function cabVolver(titulo, extra) {
+    return '<div class="cab"><div class="cab-izq"><button class="volver" data-volver aria-label="Volver">' + ic('atras', 24) + '</button><h1>' + esc(titulo) + '</h1></div>' + (extra || '') + '</div>';
+  }
+  function enlazarVolver(app, destino) {
+    app.querySelectorAll('[data-volver]').forEach(function (b) {
+      b.onclick = function () { if (history.length > 1) history.back(); else ir(destino || '#/a/inicio'); };
+    });
+  }
+
+  /* ================= Formularios genéricos ================= */
+
+  function campo(def, valor) {
+    var id = 'f_' + def.n;
+    var v = valor == null ? '' : valor;
+    var opc = def.req ? '' : ' <span class="opcional">(opcional)</span>';
+    var et = '<label for="' + id + '">' + esc(def.l) + opc + '</label>';
+    var h;
+    if (def.t === 'select') {
+      h = et + '<select id="' + id + '" name="' + def.n + '">' + (def.vacio !== false ? '<option value="">' + esc(def.vacio || '— Sin indicar —') + '</option>' : '') +
+        def.op.map(function (o) {
+          var val = typeof o === 'string' ? o : o[0], txt = typeof o === 'string' ? o : o[1];
+          return '<option value="' + esc(val) + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + esc(txt) + '</option>';
+        }).join('') + '</select>';
+    } else if (def.t === 'multi') {
+      var sel = lista(v);
+      h = '<span class="etiqueta">' + esc(def.l) + opc + '</span><div class="multi">' + (def.op.length ? def.op.map(function (o) {
+        return '<label><input type="checkbox" name="' + def.n + '" value="' + esc(o) + '"' + (sel.indexOf(o) >= 0 ? ' checked' : '') + '><span>' + esc(o) + '</span></label>';
+      }).join('') : '<span class="item-sub">Agrega opciones en la pestaña Config de tu hoja.</span>') + '</div>';
+    } else if (def.t === 'seg') {
+      h = '<span class="etiqueta">' + esc(def.l) + opc + '</span><div class="segmento' + (def.op.length === 2 ? ' dos' : '') + '">' + def.op.map(function (o) {
+        var val = typeof o === 'string' ? o : o[0], txt = typeof o === 'string' ? o : o[1];
+        return '<label><input type="radio" name="' + def.n + '" value="' + esc(val) + '"' + (String(v) === String(val) ? ' checked' : '') + '><span>' + esc(txt) + '</span></label>';
+      }).join('') + '</div>';
+    } else if (def.t === 'area') {
+      h = et + '<textarea id="' + id + '" name="' + def.n + '" rows="3" placeholder="' + esc(def.ph || '') + '">' + esc(v) + '</textarea>';
+    } else {
+      var tipo = def.t || 'text';
+      var extra = tipo === 'num' ? ' inputmode="decimal"' : '';
+      if (tipo === 'num') tipo = 'text';
+      h = et + '<input id="' + id + '" name="' + def.n + '" type="' + tipo + '"' + extra + ' value="' + esc(v) + '" placeholder="' + esc(def.ph || '') + '"' + (def.t === 'tel' ? ' autocomplete="tel"' : '') + '>';
+    }
+    return '<div class="campo">' + h + '</div>';
+  }
+  function leerForm(form) {
+    var d = {};
+    Array.prototype.forEach.call(form.elements, function (el) {
+      if (!el.name || el.name === 'web') return;
+      if (el.type === 'checkbox') {
+        if (!(el.name in d)) d[el.name] = [];
+        if (el.checked) d[el.name].push(el.value);
+      } else if (el.type === 'radio') {
+        if (el.checked) d[el.name] = el.value; else if (!(el.name in d)) d[el.name] = '';
+      } else d[el.name] = el.value.trim();
+    });
+    Object.keys(d).forEach(function (k) { if (Array.isArray(d[k])) d[k] = d[k].join(', '); });
+    if (form.elements.web) d.web = form.elements.web.value;
+    return d;
+  }
+  function errorForm(form, msg) {
+    var e = form.querySelector('.error');
+    if (!e) { e = document.createElement('p'); e.className = 'error'; e.setAttribute('role', 'alert'); form.querySelector('.barra-guardar, .acciones-form').prepend(e); }
+    e.textContent = msg;
+  }
+
+  function defsInteresado(c) {
+    return [
+      { n: 'Nombre', l: 'Nombre', req: true, ph: 'Juan Pérez' },
+      { n: 'Celular', l: 'Celular', t: 'tel', ph: '987 654 321' },
+      { n: 'Operacion', l: '¿Quiere comprar o alquilar?', t: 'seg', op: [['Venta', 'Comprar'], ['Alquiler', 'Alquilar']] },
+      { n: 'Tipo', l: '¿Qué busca?', t: 'select', op: TIPOS },
+      { n: 'Zonas', l: 'Zonas que le interesan', t: 'multi', op: c.zonas },
+      { n: 'PresupuestoMax', l: 'Presupuesto máximo (S/)', t: 'num', ph: '150000' },
+      { n: 'AreaMin', l: 'Área mínima (m²)', t: 'num', ph: '150' },
+      { n: 'DormitoriosMin', l: 'Dormitorios mínimos', t: 'num', ph: '2' },
+      { n: 'Caracteristicas', l: 'Características que desea', t: 'multi', op: c.caracteristicas }
+    ];
+  }
+  function defsPropiedad(c) {
+    return [
+      { n: 'Operacion', l: 'Operación', t: 'seg', op: OPERACIONES },
+      { n: 'Tipo', l: 'Tipo de propiedad', t: 'select', op: TIPOS, req: true, vacio: '— Elige el tipo —' },
+      { n: 'Zona', l: 'Zona', t: 'select', op: c.zonas },
+      { n: 'Direccion', l: 'Dirección o referencia', ph: 'Av. principal 123' },
+      { n: 'Area', l: 'Área (m²)', t: 'num', ph: '200' },
+      { n: 'Dormitorios', l: 'Dormitorios', t: 'num', ph: '3' },
+      { n: 'Precio', l: 'Precio (S/)', t: 'num', ph: '120000' },
+      { n: 'Caracteristicas', l: 'Características', t: 'multi', op: c.caracteristicas },
+      { n: 'Descripcion', l: 'Descripción', t: 'area', ph: 'Detalles que ayuden al comprador.' }
+    ];
+  }
+
+  /* ================= Vistas públicas ================= */
+
+  function cargarPub(cb) {
+    if (S.pub) return cb();
+    api('publico').then(function (r) {
+      if (r.ok) { S.pub = r.data; cb(); }
+      else pintar('<div class="pantalla publica"><div class="vacio">' + esc(r.error || 'No se pudo cargar el catálogo.') + '</div><button class="btn" onclick="location.reload()">Intentar de nuevo</button></div>');
+    });
+  }
+  function avisoDemo() {
+    return DEMO ? '<div class="aviso-demo">Modo demo: los datos son de ejemplo y se guardan solo en este celular. PIN del agente: 1234.</div>' : '';
+  }
+  function tarjetaPub(p) {
+    var det = [];
+    if (num(p.Area) != null) det.push(num(p.Area) + ' m²');
+    if (num(p.Dormitorios) != null) det.push(num(p.Dormitorios) + ' dorm.');
+    return '<a class="prop" href="#/p/' + esc(p.ID) + '">' + icTipo(p.Tipo) + '<div class="prop-cuerpo"><span class="prop-meta">' + esc(p.Tipo) + (p.Operacion ? ' en ' + esc(p.Operacion.toLowerCase()) : '') + '</span>' +
+      '<span class="prop-titulo">' + esc(p.Zona || 'Zona por confirmar') + '</span>' + (det.length ? '<span class="prop-sub">' + esc(det.join(' · ')) + '</span>' : '') +
+      '<span class="precio">' + (dinero(p.Precio) || 'Precio a consultar') + '</span></div></a>';
+  }
+
+  function vCatalogo() {
+    cargarPub(function () {
+      var c = S.pub.config, f = S.filtrosPub;
+      var props = S.pub.Propiedades.filter(function (p) {
+        if (f.operacion && p.Operacion !== f.operacion) return false;
+        if (f.tipo && p.Tipo !== f.tipo) return false;
+        if (f.zona && p.Zona !== f.zona) return false;
+        if (num(f.precioMax) != null && num(p.Precio) != null && num(p.Precio) > num(f.precioMax)) return false;
+        return true;
+      });
+      var chipsTipo = ['', 'Terreno', 'Casa', 'Departamento', 'Local'].map(function (t) {
+        return '<button class="chip' + (f.tipo === t ? ' activo' : '') + '" data-tipo="' + t + '">' + (t ? t + 's' : 'Todas') + '</button>';
+      }).join('');
+      pintar('<div class="pantalla publica">' +
+        '<header class="portada"><div class="marca"><span class="marca-logo">' + ic('casa', 22) + '</span>' + esc(c.negocio) + '</div>' +
+        '<h1>Terrenos, casas y departamentos cerca de ti</h1><p>Mira las propiedades disponibles o deja tu pedido y te avisamos cuando aparezca lo que buscas.</p>' +
+        '<div class="acciones-pub"><a class="accion-pub" href="#/publicar">' + ic('megafono', 24) + '<strong>Publica tu propiedad gratis</strong><span>Para propietarios</span></a>' +
+        '<a class="accion-pub" href="#/busco">' + ic('lupa', 24) + '<strong>Cuéntanos qué buscas</strong><span>Te recomendamos opciones</span></a></div></header>' +
+        avisoDemo() +
+        '<div class="seccion"><div class="seccion-cab"><h2>Propiedades disponibles</h2></div>' +
+        '<div class="chips" role="group" aria-label="Operación">' + [['', 'Venta y alquiler'], ['Venta', 'En venta'], ['Alquiler', 'En alquiler']].map(function (o) {
+          return '<button class="chip' + (f.operacion === o[0] ? ' activo' : '') + '" data-op="' + o[0] + '">' + o[1] + '</button>';
+        }).join('') + '</div>' +
+        '<div class="chips" role="group" aria-label="Tipo">' + chipsTipo + '</div>' +
+        '<div class="dos-col">' + campo({ n: 'zona', l: 'Zona', t: 'select', op: c.zonas, vacio: 'Todas', req: true }, f.zona) +
+        campo({ n: 'precioMax', l: 'Precio hasta (S/)', t: 'num', ph: 'Sin límite', req: true }, f.precioMax) + '</div>' +
+        '<p class="contador">' + props.length + (props.length === 1 ? ' propiedad' : ' propiedades') + '</p>' +
+        '<div class="lista-props">' + (props.length ? props.map(tarjetaPub).join('') : '<div class="vacio">No hay propiedades con esos filtros. <a href="#/busco">Cuéntanos qué buscas</a> y te avisamos.</div>') + '</div></div>' +
+        '<footer class="pie"><span>' + esc(c.negocio) + '</span><button data-agente>Acceso para el agente</button></footer></div>',
+        function (app) {
+          app.querySelectorAll('[data-tipo]').forEach(function (b) { b.onclick = function () { f.tipo = b.dataset.tipo; vCatalogo(); }; });
+          app.querySelectorAll('[data-op]').forEach(function (b) { b.onclick = function () { f.operacion = b.dataset.op; vCatalogo(); }; });
+          app.querySelector('#f_zona').onchange = function (e) { f.zona = e.target.value; vCatalogo(); };
+          app.querySelector('#f_precioMax').onchange = function (e) { f.precioMax = e.target.value; vCatalogo(); };
+          app.querySelector('[data-agente]').onclick = function () { ir('#/agente'); };
+        });
+    });
+  }
+
+  function vDetallePub(p) {
+    cargarPub(function () {
+      var prop = S.pub.Propiedades.find(function (x) { return x.ID === p[0]; });
+      var c = S.pub.config;
+      if (!prop) return pintar('<div class="pantalla publica">' + cabVolver('Propiedad') + '<div class="vacio">Esta propiedad ya no está disponible.</div></div>', function (a) { enlazarVolver(a, '#/'); });
+      var msg = 'Hola, me interesa la propiedad ' + prop.ID + ': ' + prop.Tipo + (prop.Zona ? ' en ' + prop.Zona : '') + (prop.Precio ? ' (' + dinero(prop.Precio) + ')' : '') + '. ¿Me das más información?';
+      var wsp = wspLink(c.whatsapp, msg);
+      pintar('<div class="pantalla publica">' + cabVolver(prop.Tipo + (prop.Operacion ? ' en ' + prop.Operacion.toLowerCase() : '')) +
+        '<div class="ficha"><div class="ficha-top">' + icTipo(prop.Tipo) + '<div><h2>' + esc(prop.Zona || 'Zona por confirmar') + '</h2><span class="precio">' + (dinero(prop.Precio) || 'Precio a consultar') + '</span></div></div>' +
+        '<dl class="datos"><dt>Código</dt><dd>' + esc(prop.ID) + '</dd>' +
+        (num(prop.Area) != null ? '<dt>Área</dt><dd>' + num(prop.Area) + ' m²</dd>' : '') +
+        (num(prop.Dormitorios) != null ? '<dt>Dormitorios</dt><dd>' + num(prop.Dormitorios) + '</dd>' : '') + '</dl>' +
+        (lista(prop.Caracteristicas).length ? '<div class="chips-lectura">' + lista(prop.Caracteristicas).map(function (x) { return '<span class="razon si">✓ ' + esc(x) + '</span>'; }).join('') + '</div>' : '') +
+        (prop.Descripcion ? '<p style="font-size:15px">' + esc(prop.Descripcion) + '</p>' : '') + '</div>' +
+        (wsp ? '<a class="btn verde ancho" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp') + 'Me interesa, escribir por WhatsApp</a>' : '') +
+        '<a class="btn ancho" href="#/busco">Busco algo diferente</a></div>', function (a) { enlazarVolver(a, '#/'); });
+    });
+  }
+
+  function vPublicar() {
+    cargarPub(function () {
+      var c = S.pub.config;
+      pintar('<div class="pantalla publica">' + cabVolver('Publica tu propiedad') +
+        '<p style="color:var(--texto-2);font-size:15px">Es gratis. Revisamos los datos y la publicamos en el catálogo. Tu número no se muestra a los visitantes.</p>' +
+        '<form class="formulario" novalidate>' +
+        '<div class="trampa" aria-hidden="true"><input name="web" tabindex="-1" autocomplete="off"></div>' +
+        campo({ n: 'Nombre', l: 'Tu nombre', req: true, ph: 'María Quispe' }) + campo({ n: 'Celular', l: 'Tu celular', t: 'tel', req: true, ph: '984 123 456' }) +
+        defsPropiedad(c).map(function (d) { return campo(d); }).join('') +
+        '<div class="acciones-form" style="display:flex;flex-direction:column;gap:10px"><button class="btn primario ancho" type="submit">Enviar mi propiedad</button></div></form></div>',
+        function (app) {
+          enlazarVolver(app, '#/');
+          var form = app.querySelector('form');
+          form.onsubmit = function (e) {
+            e.preventDefault();
+            var d = leerForm(form);
+            if (!d.Nombre || !d.Celular) return errorForm(form, 'Escribe tu nombre y tu celular para poder contactarte.');
+            if (!d.Tipo) return errorForm(form, 'Elige el tipo de propiedad.');
+            cargando(true);
+            api('publicarPropiedad', d).then(function (r) {
+              cargando(false);
+              if (!r.ok) return errorForm(form, r.error || 'No se pudo enviar. Inténtalo de nuevo.');
+              pintar('<div class="pantalla publica"><div class="exito"><span class="circulo">' + ic('check', 32) + '</span><h1 style="font-size:22px">Recibimos tu propiedad</h1>' +
+                '<p style="color:var(--texto-2)">Te escribiremos al ' + esc(d.Celular) + ' para confirmar los datos antes de publicarla.</p></div><a class="btn ancho" href="#/">Volver al catálogo</a></div>');
+            });
+          };
+        });
+    });
+  }
+
+  function vBusco() {
+    cargarPub(function () {
+      var c = S.pub.config;
+      pintar('<div class="pantalla publica">' + cabVolver('¿Qué estás buscando?') +
+        '<p style="color:var(--texto-2);font-size:15px">Completa lo que sepas; puedes dejar campos vacíos. Te mostramos al instante las propiedades que coinciden.</p>' +
+        '<form class="formulario" novalidate><div class="trampa" aria-hidden="true"><input name="web" tabindex="-1" autocomplete="off"></div>' +
+        defsInteresado(c).map(function (d) {
+          if (d.n === 'Nombre') d = { n: 'Nombre', l: 'Tu nombre', req: true, ph: 'Juan Pérez' };
+          if (d.n === 'Celular') d = { n: 'Celular', l: 'Tu celular', t: 'tel', req: true, ph: '987 654 321' };
+          return campo(d);
+        }).join('') +
+        '<div class="acciones-form" style="display:flex;flex-direction:column;gap:10px"><button class="btn primario ancho" type="submit">Ver propiedades para mí</button></div></form></div>',
+        function (app) {
+          enlazarVolver(app, '#/');
+          var form = app.querySelector('form');
+          form.onsubmit = function (e) {
+            e.preventDefault();
+            var d = leerForm(form);
+            if (!d.Nombre || !d.Celular) return errorForm(form, 'Escribe tu nombre y tu celular para avisarte de nuevas opciones.');
+            cargando(true);
+            api('registrarInteres', d).then(function (r) {
+              cargando(false);
+              if (!r.ok) return errorForm(form, r.error || 'No se pudo enviar. Inténtalo de nuevo.');
+              var recos = recomendarPara(d, S.pub.Propiedades);
+              pintar('<div class="pantalla publica"><div class="exito"><span class="circulo">' + ic('check', 32) + '</span><h1 style="font-size:22px">Listo, ' + esc(d.Nombre.split(' ')[0]) + '</h1>' +
+                '<p style="color:var(--texto-2)">Guardamos lo que buscas. Si aparece algo nuevo, te escribimos.</p></div>' +
+                '<div class="seccion"><div class="seccion-cab"><h2>' + (recos.length ? 'Opciones para ti ahora' : 'Aún no hay opciones que coincidan') + '</h2></div>' +
+                (recos.length ? recos.map(function (x) {
+                  return '<div class="reco"><a class="reco-cab" href="#/p/' + esc(x.p.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(x.p.Tipo + (x.p.Zona ? ' en ' + x.p.Zona : '')) + '</span><span class="precio">' + (dinero(x.p.Precio) || 'Precio a consultar') + '</span></div></a>' + htmlRazones(x.m.razones) + '</div>';
+                }).join('') : '<div class="vacio">Te avisaremos apenas tengamos una propiedad para ti.</div>') + '</div>' +
+                '<a class="btn ancho" href="#/">Ver todo el catálogo</a></div>');
+            });
+          };
+        });
+    });
+  }
+
+  function vLogin() {
+    pintar('<div class="pantalla publica">' + cabVolver('Acceso del agente') + avisoDemo() +
+      '<form class="formulario" novalidate>' + campo({ n: 'pin', l: 'PIN', t: 'password', req: true, ph: '••••' }) +
+      '<div class="acciones-form" style="display:flex;flex-direction:column;gap:10px"><button class="btn primario ancho" type="submit">Entrar</button></div></form></div>',
+      function (app) {
+        enlazarVolver(app, '#/');
+        var form = app.querySelector('form');
+        var inp = app.querySelector('#f_pin');
+        inp.setAttribute('inputmode', 'numeric'); inp.setAttribute('autocomplete', 'current-password'); inp.focus();
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var pin = inp.value.trim();
+          if (!pin) return errorForm(form, 'Escribe tu PIN.');
+          S.pin = pin;
+          cargando(true);
+          api('login').then(function (r) {
+            cargando(false);
+            if (!r.ok) { S.pin = ''; return errorForm(form, r.error || 'PIN incorrecto.'); }
+            guardarLocal('inmo_pin', pin);
+            S.db = null;
+            ir('#/a/inicio');
+          });
+        };
+      });
+  }
+
+  /* ================= Vistas del agente ================= */
+
+  function itemCita(c) {
+    var int = buscarId('Interesados', c.ID_Interesado), p = buscarId('Propiedades', c.ID_Propiedad);
+    var tel = int && telLink(int.Celular);
+    return '<div class="item"><a href="#/a/cita/' + esc(c.ID) + '" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;text-decoration:none;color:inherit">' +
+      '<span class="hora">' + esc(c.Hora || '—') + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(int ? int.Nombre : 'Sin interesado') +
+      (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado ' + esc(c.Estado) + '" style="font-size:12px">' + esc(c.Estado) + '</span>' : '') + '</div><div class="item-sub">' + esc(resumenProp(p)) + '</div></div></a>' +
+      (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar a ' + esc(int.Nombre) + '">' + ic('tel', 20) + '</a>' : '') + '</div>';
+  }
+
+  function itemLlamada(l) {
+    var tipo = tipoDeLlamada(l), ct = contacto(tipo, l.ID_Contacto);
+    var etiqueta = NOMBRE_TIPO[tipo] + (tipo === 'otro' && ct && ct.Categoria ? ' · ' + ct.Categoria : '');
+    var hecha = l.Estado === 'Hecha';
+    var tel = ct && telLink(ct.Celular);
+    var cuando = l.Fecha && l.Fecha !== hoy() ? fechaCorta(l.Fecha) + ' · ' : '';
+    return '<div class="item' + (hecha ? ' tachado' : '') + '"><button class="check' + (hecha ? ' hecho' : '') + '" data-hecha="' + esc(l.ID) + '" aria-label="' + (hecha ? 'Marcar como pendiente' : 'Marcar como hecha') + '"><span>' + (hecha ? ic('check', 16) : '') + '</span></button>' +
+      '<a href="#/a/llamada/' + esc(l.ID) + '" class="item-cuerpo" style="text-decoration:none;color:inherit"><div class="item-titulo">' + esc(ct ? ct.Nombre : 'Contacto eliminado') + ' <span class="tag ' + tipo + '">' + esc(etiqueta) + '</span></div>' +
+      '<div class="item-sub">' + esc(cuando + (l.Motivo || 'Sin motivo')) + '</div></a>' +
+      (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar">' + ic('tel', 20) + '</a>' : '') + '</div>';
+  }
+  function enlazarChecks(app, rehacer) {
+    app.querySelectorAll('[data-hecha]').forEach(function (b) {
+      b.onclick = function () {
+        var l = buscarId('Llamadas', b.dataset.hecha);
+        if (!l) return;
+        var nuevo = Object.assign({}, l, { Estado: l.Estado === 'Hecha' ? 'Pendiente' : 'Hecha' });
+        guardarRegistro('Llamadas', nuevo).then(function () { toast(nuevo.Estado === 'Hecha' ? 'Llamada hecha' : 'Llamada pendiente'); rehacer(); });
+      };
+    });
+  }
+
+  VISTAS.inicio = function () {
+    var h = hoy();
+    var citasHoy = citasActivas().filter(function (c) { return c.Fecha === h; }).sort(ordenarCitas);
+    var pend = llamadasPendientes().filter(function (l) { return !l.Fecha || l.Fecha <= h; }).sort(function (a, b) { return (a.Fecha || '').localeCompare(b.Fecha || ''); });
+    var porAprobar = T('Propiedades').filter(function (p) { return p.Estado === 'Pendiente'; });
+    var hace7 = sumarDias(h, -7);
+    var nuevosInt = T('Interesados').filter(function (i) { return i.Origen === 'App' && String(i.FechaRegistro).slice(0, 10) >= hace7; });
+    var nuevos = porAprobar.map(function (p) {
+      var dueno = buscarId('Propietarios', p.ID_Propietario);
+      return '<a class="item" href="#/a/propiedad/' + esc(p.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(resumenProp(p)) + ' <span class="tag app">Por aprobar</span></div><div class="item-sub">Enviada por ' + esc(dueno ? dueno.Nombre : 'propietario') + '</div></div></a>';
+    }).concat(nuevosInt.map(function (i) {
+      return '<a class="item" href="#/a/contacto/interesado/' + esc(i.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(i.Nombre) + ' <span class="tag interesado">Nuevo interesado</span></div><div class="item-sub">Busca: ' + esc([i.Tipo, lista(i.Zonas).join(', ')].filter(Boolean).join(' · ') || 'sin detalles') + '</div></div></a>';
+    }));
+    pintar('<div class="pantalla"><div class="cab"><div><p class="fecha-hoy">' + fechaLarga(h) + '</p><p class="saludo">' + saludo() + '</p></div>' +
+      '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a></div>' + avisoDemo() +
+      '<div class="metricas"><a class="metrica" href="#/a/citas"><span>Visitas hoy</span><strong>' + citasHoy.length + '</strong></a>' +
+      '<a class="metrica naranja" href="#/a/llamadas"><span>Llamadas pendientes</span><strong>' + pend.length + '</strong></a></div>' +
+      (nuevos.length ? '<div class="seccion"><div class="seccion-cab"><h2>Nuevos desde la app</h2></div><div class="lista">' + nuevos.join('') + '</div></div>' : '') +
+      '<div class="seccion"><div class="seccion-cab"><h2>Visitas de hoy</h2><a class="ver-todo" href="#/a/citas">Ver todo</a></div>' +
+      (citasHoy.length ? '<div class="lista">' + citasHoy.map(itemCita).join('') + '</div>' : '<div class="vacio">No tienes visitas hoy. <a href="#/a/cita-nueva">Agendar una cita</a></div>') + '</div>' +
+      '<div class="seccion"><div class="seccion-cab"><h2>Llamadas pendientes</h2><a class="ver-todo" href="#/a/llamadas">Ver todo</a></div>' +
+      (pend.length ? '<div class="lista">' + pend.slice(0, 6).map(itemLlamada).join('') + '</div>' : '<div class="vacio">No tienes llamadas pendientes para hoy.</div>') + '</div>' +
+      '<div class="menu-agente"><a class="btn ancho" href="#/" data-catalogo>' + ic('edificio', 20) + 'Ver mi catálogo público</a>' +
+      '<div class="fila-btns"><button class="btn chico" data-recargar>' + ic('recargar', 18) + 'Actualizar datos</button><button class="btn chico peligro" data-salir>' + ic('salir', 18) + 'Cerrar sesión</button></div></div>' +
+      '</div>' + nav('inicio'), function (app) {
+        enlazarChecks(app, VISTAS.inicio);
+        app.querySelector('[data-catalogo]').onclick = function (e) { e.preventDefault(); S.pub = null; location.hash = '#/catalogo'; };
+        app.querySelector('[data-recargar]').onclick = function () { S.pub = null; cargarDb(true); toast('Actualizando…'); };
+        app.querySelector('[data-salir]').onclick = function () { if (confirm('¿Cerrar sesión en este celular?')) salirAgente(); };
+      });
+  };
+
+  VISTAS.llamadas = function () {
+    var h = hoy();
+    var pend = llamadasPendientes();
+    var grupos = [
+      ['Atrasadas', pend.filter(function (l) { return l.Fecha && l.Fecha < h; }), true],
+      ['Hoy', pend.filter(function (l) { return l.Fecha === h; })],
+      ['Próximas', pend.filter(function (l) { return l.Fecha > h; })],
+      ['Sin fecha', pend.filter(function (l) { return !l.Fecha; })]
+    ];
+    var hechas = T('Llamadas').filter(function (l) { return l.Estado === 'Hecha'; }).sort(function (a, b) { return (b.Fecha || '').localeCompare(a.Fecha || ''); });
+    var cuerpo = grupos.filter(function (g) { return g[1].length; }).map(function (g) {
+      g[1].sort(function (a, b) { return (a.Fecha || '').localeCompare(b.Fecha || ''); });
+      return '<div class="seccion"><div class="seccion-cab"><h2' + (g[2] ? ' class="alerta"' : '') + '>' + g[0] + '</h2></div><div class="lista">' + g[1].map(itemLlamada).join('') + '</div></div>';
+    }).join('');
+    pintar('<div class="pantalla">' + cabVolver('Llamadas', '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a>') +
+      (cuerpo || '<div class="vacio">No tienes llamadas pendientes. Toca + para programar una.</div>') +
+      (hechas.length ? '<button class="btn ancho" data-hechas>' + (S.verHechas ? 'Ocultar hechas' : 'Ver hechas (' + hechas.length + ')') + '</button>' +
+        (S.verHechas ? '<div class="lista">' + hechas.map(itemLlamada).join('') + '</div>' : '') : '') +
+      '</div>' + nav('inicio'), function (app) {
+        enlazarVolver(app);
+        enlazarChecks(app, VISTAS.llamadas);
+        var b = app.querySelector('[data-hechas]');
+        if (b) b.onclick = function () { S.verHechas = !S.verHechas; VISTAS.llamadas(); };
+      });
+  };
+
+  VISTAS.contactos = function (p, q) {
+    if (q.tab) S.tabContactos = q.tab;
+    var tab = S.tabContactos, qq = S.qContactos.toLowerCase();
+    var filas = T(TABLA_DE[tab]).filter(function (c) {
+      return !qq || (c.Nombre + ' ' + c.Celular + ' ' + (c.Categoria || '')).toLowerCase().indexOf(qq) >= 0;
+    }).sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
+    var html = filas.map(function (c) {
+      var sub = c.Celular || 'Sin celular';
+      var extra = '';
+      if (tab === 'interesado') extra = 'Busca: ' + ([c.Tipo, c.PresupuestoMax ? 'hasta ' + dinero(c.PresupuestoMax) : ''].filter(Boolean).join(' · ') || 'sin detalles');
+      if (tab === 'propietario') {
+        var n = T('Propiedades').filter(function (x) { return x.ID_Propietario === c.ID; }).length;
+        extra = n + (n === 1 ? ' propiedad' : ' propiedades');
+      }
+      if (tab === 'otro') extra = [c.Categoria, c.Detalle].filter(Boolean).join(' · ');
+      return '<a class="item" href="#/a/contacto/' + tab + '/' + esc(c.ID) + '"><span class="avatar ' + tab + '">' + esc(iniciales(c.Nombre)) + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(c.Nombre) +
+        (c.Origen === 'App' ? ' <span class="tag app">App</span>' : '') + '</div><div class="item-sub">' + esc(sub) + '</div>' + (extra ? '<div class="item-sub">' + esc(extra) + '</div>' : '') + '</div></a>';
+    }).join('');
+    pintar('<div class="pantalla"><div class="cab"><h1>Contactos</h1><a class="btn-redondo" href="#/a/contacto-form/' + tab + '" aria-label="Registrar contacto">' + ic('mas', 26) + '</a></div>' +
+      '<div class="pestanas" role="tablist">' + ['interesado', 'propietario', 'otro'].map(function (t) {
+        return '<button role="tab" aria-selected="' + (t === tab) + '" class="' + (t === tab ? 'activo' : '') + '" data-tab="' + t + '">' + { interesado: 'Interesados', propietario: 'Propietarios', otro: 'Otros' }[t] + '</button>';
+      }).join('') + '</div>' +
+      '<div class="caja-busqueda">' + ic('buscar', 20) + '<input id="qc" type="search" placeholder="Buscar por nombre o celular" aria-label="Buscar contacto" value="' + esc(S.qContactos) + '"></div>' +
+      (html ? '<div class="lista">' + html + '</div>' : '<div class="vacio">' + (qq ? 'Sin resultados para esa búsqueda.' : 'Aún no tienes contactos aquí. Toca + para registrar el primero.') + '</div>') +
+      '</div>' + nav('contactos'), function (app) {
+        app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { S.tabContactos = b.dataset.tab; VISTAS.contactos([], {}); }; });
+        var inp = app.querySelector('#qc');
+        inp.oninput = function () {
+          S.qContactos = inp.value; var pos = inp.selectionStart; VISTAS.contactos([], {});
+          var n = document.getElementById('qc'); n.focus(); n.setSelectionRange(pos, pos);
+        };
+      });
+  };
+
+  VISTAS.contacto = function (p) {
+    var tipo = p[0], c = contacto(tipo, p[1]);
+    if (!c) return pintar('<div class="pantalla">' + cabVolver('Contacto') + '<div class="vacio">Este contacto ya no existe.</div></div>' + nav('contactos'), function (a) { enlazarVolver(a, '#/a/contactos'); });
+    var tel = telLink(c.Celular), wsp = wspLink(c.Celular);
+    var datos = '<dt>Celular</dt><dd>' + esc(c.Celular || '—') + '</dd>';
+    var extra = '';
+    if (tipo === 'interesado') {
+      datos += '<dt>Operación</dt><dd>' + esc(c.Operacion === 'Venta' ? 'Comprar' : (c.Operacion === 'Alquiler' ? 'Alquilar' : '—')) + '</dd>' +
+        '<dt>Busca</dt><dd>' + esc(c.Tipo || '—') + '</dd><dt>Zonas</dt><dd>' + esc(c.Zonas || '—') + '</dd>' +
+        '<dt>Presupuesto</dt><dd>' + esc(dinero(c.PresupuestoMax) || '—') + '</dd><dt>Área mínima</dt><dd>' + esc(c.AreaMin ? c.AreaMin + ' m²' : '—') + '</dd>' +
+        '<dt>Dormitorios</dt><dd>' + esc(c.DormitoriosMin || '—') + '</dd><dt>Desea</dt><dd>' + esc(c.Caracteristicas || '—') + '</dd>';
+      var recos = recomendarPara(c, T('Propiedades'));
+      extra += '<div class="seccion"><div class="seccion-cab"><h2>Propiedades recomendadas</h2></div>' + (recos.length ? recos.map(function (x) {
+        return '<div class="reco"><a class="reco-cab" href="#/a/propiedad/' + esc(x.p.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(resumenProp(x.p)) + '</span><span class="precio">' + (dinero(x.p.Precio) || 'Sin precio') + '</span></div></a>' +
+          htmlRazones(x.m.razones) + '<a class="btn chico" href="#/a/cita-nueva?int=' + esc(c.ID) + '&prp=' + esc(x.p.ID) + '">' + ic('cal', 18) + 'Agendar cita</a></div>';
+      }).join('') : '<div class="vacio">Ninguna propiedad disponible coincide todavía.</div>') + '</div>';
+      var citas = T('Citas').filter(function (x) { return x.ID_Interesado === c.ID; }).sort(ordenarCitas);
+      if (citas.length) extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus citas</h2></div><div class="lista">' + citas.map(function (x) {
+        var pp = buscarId('Propiedades', x.ID_Propiedad);
+        return '<a class="item" href="#/a/cita/' + esc(x.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(fechaCorta(x.Fecha) + (x.Hora ? ' · ' + x.Hora : '')) + ' <span class="estado ' + esc(x.Estado) + '" style="font-size:12px">' + esc(x.Estado || '') + '</span></div><div class="item-sub">' + esc(resumenProp(pp)) + '</div></div></a>';
+      }).join('') + '</div></div>';
+    }
+    if (tipo === 'propietario') {
+      var props = T('Propiedades').filter(function (x) { return x.ID_Propietario === c.ID; });
+      extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus propiedades</h2><a class="ver-todo" href="#/a/propiedad-form?dueno=' + esc(c.ID) + '">+ Agregar</a></div>' +
+        (props.length ? '<div class="lista-props">' + props.map(tarjetaAgente).join('') + '</div>' : '<div class="vacio">Sin propiedades registradas.</div>') + '</div>';
+    }
+    if (tipo === 'otro') datos += '<dt>Categoría</dt><dd>' + esc(c.Categoria || '—') + '</dd><dt>Detalle</dt><dd>' + esc(c.Detalle || '—') + '</dd>';
+    if (c.Notas) datos += '<dt>Notas</dt><dd>' + esc(c.Notas) + '</dd>';
+    datos += '<dt>Registrado</dt><dd>' + esc(String(c.FechaRegistro || '').slice(0, 10) || '—') + (c.Origen === 'App' ? ' (desde la app)' : '') + '</dd>';
+    pintar('<div class="pantalla">' + cabVolver(NOMBRE_TIPO[tipo], '<a class="btn-icono borde" href="#/a/contacto-form/' + tipo + '/' + esc(c.ID) + '" aria-label="Editar">' + ic('lapiz', 20) + '</a>') +
+      '<div class="ficha"><div class="ficha-top"><span class="avatar ' + tipo + '">' + esc(iniciales(c.Nombre)) + '</span><h2>' + esc(c.Nombre) + '</h2></div>' +
+      (tel || wsp ? '<div class="fila-btns">' + (tel ? '<a class="btn chico" href="' + tel + '">' + ic('tel', 18) + 'Llamar</a>' : '') + (wsp ? '<a class="btn chico" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp', 18) + 'WhatsApp</a>' : '') + '</div>' : '') +
+      '<dl class="datos">' + datos + '</dl>' +
+      '<a class="btn chico" href="#/a/llamada-nueva?tipo=' + tipo + '&id=' + esc(c.ID) + '">' + ic('llamadas', 18) + 'Programar llamada</a></div>' +
+      extra + '<button class="btn peligro ancho" data-borrar>Eliminar contacto</button></div>' + nav('contactos'), function (app) {
+        enlazarVolver(app, '#/a/contactos');
+        app.querySelector('[data-borrar]').onclick = function () {
+          if (!confirm('¿Eliminar a ' + c.Nombre + '? Esta acción no se puede deshacer.')) return;
+          eliminarRegistro(TABLA_DE[tipo], c.ID).then(function () { toast('Contacto eliminado'); ir('#/a/contactos'); });
+        };
+      });
+  };
+
+  VISTAS['contacto-form'] = function (p) {
+    var tipo = p[0] || 'interesado', c = p[1] ? contacto(tipo, p[1]) : null;
+    var cf = conf();
+    var defs;
+    if (tipo === 'interesado') defs = defsInteresado(cf).concat([{ n: 'Notas', l: 'Notas', t: 'area' }]);
+    else if (tipo === 'propietario') defs = [{ n: 'Nombre', l: 'Nombre', req: true, ph: 'María Quispe' }, { n: 'Celular', l: 'Celular', t: 'tel', ph: '984 123 456' }, { n: 'Notas', l: 'Notas', t: 'area' }];
+    else defs = [{ n: 'Nombre', l: 'Nombre', req: true, ph: 'Dr. Ramírez' }, { n: 'Celular', l: 'Celular', t: 'tel', ph: '984 700 120' }, { n: 'Categoria', l: 'Categoría', t: 'select', op: cf.categoriasOtros }, { n: 'Detalle', l: 'Detalle', t: 'area', ph: 'Notaría del centro' }];
+    var titulo = (c ? 'Editar ' : 'Nuevo ') + NOMBRE_TIPO[tipo].toLowerCase();
+    pintar('<div class="pantalla">' + cabVolver(titulo.charAt(0).toUpperCase() + titulo.slice(1)) +
+      (!c ? '<div class="segmento" role="group" aria-label="Tipo de contacto">' + ['interesado', 'propietario', 'otro'].map(function (t) {
+        return '<label><input type="radio" name="tipoC" value="' + t + '"' + (t === tipo ? ' checked' : '') + '><span>' + NOMBRE_TIPO[t] + '</span></label>';
+      }).join('') + '</div>' : '') +
+      '<form class="formulario" novalidate>' + defs.map(function (d) { return campo(d, c ? c[d.n] : ''); }).join('') +
+      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar</button></div></form></div>', function (app) {
+        enlazarVolver(app, '#/a/contactos');
+        app.querySelectorAll('[name=tipoC]').forEach(function (r) { r.onchange = function () { history.replaceState(null, '', '#/a/contacto-form/' + r.value); render(); }; });
+        var form = app.querySelector('form');
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(form);
+          if (!d.Nombre) return errorForm(form, 'Escribe al menos el nombre.');
+          if (c) d.ID = c.ID; else if (tipo !== 'otro') d.Origen = 'Agente';
+          guardarRegistro(TABLA_DE[tipo], d).then(function (g) {
+            toast('Contacto guardado');
+            history.replaceState(null, '', '#/a/contacto/' + tipo + '/' + g.ID); render();
+          }).catch(function () {});
+        };
+      });
+  };
+
+  function tarjetaAgente(p) {
+    var dueno = buscarId('Propietarios', p.ID_Propietario);
+    return '<div class="prop"><a href="#/a/propiedad/' + esc(p.ID) + '" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;text-decoration:none;color:inherit">' + icTipo(p.Tipo) +
+      '<div class="prop-cuerpo"><span class="prop-meta">' + esc(p.Tipo) + (p.Operacion ? ' en ' + esc(p.Operacion.toLowerCase()) : '') + ' · <span class="estado ' + esc(p.Estado) + '">' + esc(p.Estado || 'Sin estado') + '</span></span>' +
+      '<span class="prop-titulo">' + esc([num(p.Area) != null ? num(p.Area) + ' m²' : (num(p.Dormitorios) != null ? num(p.Dormitorios) + ' dorm.' : ''), p.Zona].filter(Boolean).join(' · ') || 'Sin detalles') + '</span>' +
+      '<span class="prop-sub">Prop.: ' + esc(dueno ? dueno.Nombre : '—') + '</span><span class="precio">' + (dinero(p.Precio) || 'Sin precio') + '</span></div></a>' +
+      '<a class="btn-icono borde" href="#/a/propiedad-form/' + esc(p.ID) + '" aria-label="Editar propiedad">' + ic('lapiz', 18) + '</a></div>';
+  }
+
+  VISTAS.propiedades = function () {
+    var f = S.filtrosProp, cf = conf(), qq = f.q.toLowerCase();
+    var props = T('Propiedades').filter(function (p) {
+      if (f.tipo && p.Tipo !== f.tipo) return false;
+      if (f.estado && p.Estado !== f.estado) return false;
+      if (f.operacion && p.Operacion !== f.operacion) return false;
+      if (f.zona && p.Zona !== f.zona) return false;
+      if (num(f.precioMax) != null && num(p.Precio) != null && num(p.Precio) > num(f.precioMax)) return false;
+      if (qq) {
+        var dueno = buscarId('Propietarios', p.ID_Propietario);
+        if ((p.ID + ' ' + p.Zona + ' ' + p.Direccion + ' ' + p.Descripcion + ' ' + (dueno ? dueno.Nombre : '')).toLowerCase().indexOf(qq) < 0) return false;
+      }
+      return true;
+    }).sort(function (a, b) { return String(b.ID).localeCompare(String(a.ID)); });
+    var nFiltros = ['estado', 'operacion', 'zona', 'precioMax'].filter(function (k) { return f[k]; }).length;
+    pintar('<div class="pantalla"><div class="cab"><h1>Propiedades</h1><a class="btn-redondo" href="#/a/propiedad-form" aria-label="Agregar propiedad">' + ic('mas', 26) + '</a></div>' +
+      '<div class="buscador"><div class="caja-busqueda">' + ic('buscar', 20) + '<input id="qp" type="search" placeholder="Zona, dirección o propietario" aria-label="Buscar propiedad" value="' + esc(f.q) + '"></div>' +
+      '<button class="btn chico" style="min-height:48px" data-filtros aria-expanded="' + f.abierto + '">' + ic('filtro', 18) + 'Filtros' + (nFiltros ? ' (' + nFiltros + ')' : '') + '</button></div>' +
+      (f.abierto ? '<div class="panel-filtros">' + campo({ n: 'estado', l: 'Estado', t: 'select', op: ESTADOS_PROP, vacio: 'Todos', req: true }, f.estado) +
+        campo({ n: 'operacion', l: 'Operación', t: 'select', op: OPERACIONES, vacio: 'Todas', req: true }, f.operacion) +
+        campo({ n: 'zona', l: 'Zona', t: 'select', op: cf.zonas, vacio: 'Todas', req: true }, f.zona) +
+        campo({ n: 'precioMax', l: 'Precio hasta', t: 'num', ph: 'S/', req: true }, f.precioMax) +
+        '<button class="btn chico" data-limpiar style="grid-column:1/-1">Limpiar filtros</button></div>' : '') +
+      '<div class="chips" role="group" aria-label="Tipo">' + [''].concat(TIPOS).map(function (t) {
+        return '<button class="chip' + (f.tipo === t ? ' activo' : '') + '" data-tipo="' + t + '">' + (t ? t + 's' : 'Todas') + '</button>';
+      }).join('') + '</div>' +
+      '<p class="contador">' + props.length + (props.length === 1 ? ' propiedad' : ' propiedades') + '</p>' +
+      (props.length ? '<div class="lista-props">' + props.map(tarjetaAgente).join('') + '</div>' : '<div class="vacio">No hay propiedades con esos filtros.</div>') +
+      '</div>' + nav('propiedades'), function (app) {
+        app.querySelectorAll('[data-tipo]').forEach(function (b) { b.onclick = function () { f.tipo = b.dataset.tipo; VISTAS.propiedades(); }; });
+        app.querySelector('[data-filtros]').onclick = function () { f.abierto = !f.abierto; VISTAS.propiedades(); };
+        ['estado', 'operacion', 'zona', 'precioMax'].forEach(function (k) {
+          var el = app.querySelector('#f_' + k);
+          if (el) el.onchange = function () { f[k] = el.value; VISTAS.propiedades(); };
+        });
+        var l = app.querySelector('[data-limpiar]');
+        if (l) l.onclick = function () { f.estado = f.operacion = f.zona = f.precioMax = ''; VISTAS.propiedades(); };
+        var inp = app.querySelector('#qp');
+        inp.oninput = function () {
+          f.q = inp.value; var pos = inp.selectionStart; VISTAS.propiedades();
+          var n = document.getElementById('qp'); n.focus(); n.setSelectionRange(pos, pos);
+        };
+      });
+  };
+
+  VISTAS.propiedad = function (p) {
+    var pr = buscarId('Propiedades', p[0]);
+    if (!pr) return pintar('<div class="pantalla">' + cabVolver('Propiedad') + '<div class="vacio">Esta propiedad ya no existe.</div></div>' + nav('propiedades'), function (a) { enlazarVolver(a, '#/a/propiedades'); });
+    var dueno = buscarId('Propietarios', pr.ID_Propietario);
+    var ints = interesadosPara(pr, T('Interesados'));
+    var citas = T('Citas').filter(function (c) { return c.ID_Propiedad === pr.ID; }).sort(ordenarCitas);
+    pintar('<div class="pantalla">' + cabVolver(pr.Tipo, '<a class="btn-icono borde" href="#/a/propiedad-form/' + esc(pr.ID) + '" aria-label="Editar">' + ic('lapiz', 20) + '</a>') +
+      (pr.Estado === 'Pendiente' ? '<div class="recuadro"><span class="recuadro-titulo">Enviada desde la app, aún no es visible en el catálogo</span><button class="btn primario" data-estado="Disponible">' + ic('check', 20) + 'Aprobar y publicar</button></div>' : '') +
+      '<div class="ficha"><div class="ficha-top">' + icTipo(pr.Tipo) + '<div><h2>' + esc([num(pr.Area) != null ? num(pr.Area) + ' m²' : '', pr.Zona].filter(Boolean).join(' · ') || pr.Tipo) + '</h2><span class="precio">' + (dinero(pr.Precio) || 'Sin precio') + '</span></div></div>' +
+      '<dl class="datos"><dt>Código</dt><dd>' + esc(pr.ID) + '</dd><dt>Estado</dt><dd><span class="estado ' + esc(pr.Estado) + '">' + esc(pr.Estado || '—') + '</span></dd>' +
+      '<dt>Operación</dt><dd>' + esc(pr.Operacion || '—') + '</dd><dt>Dirección</dt><dd>' + esc(pr.Direccion || '—') + '</dd>' +
+      '<dt>Dormitorios</dt><dd>' + esc(pr.Dormitorios || '—') + '</dd><dt>Características</dt><dd>' + esc(pr.Caracteristicas || '—') + '</dd>' +
+      (pr.Descripcion ? '<dt>Descripción</dt><dd>' + esc(pr.Descripcion) + '</dd>' : '') +
+      '<dt>Propietario</dt><dd>' + (dueno ? '<a href="#/a/contacto/propietario/' + esc(dueno.ID) + '">' + esc(dueno.Nombre) + '</a>' + (dueno.Celular ? '<br>' + esc(dueno.Celular) : '') : '—') + '</dd></dl>' +
+      '<div class="campo"><label for="f_est">Cambiar estado</label><select id="f_est">' + ESTADOS_PROP.map(function (e) { return '<option' + (e === pr.Estado ? ' selected' : '') + '>' + e + '</option>'; }).join('') + '</select></div></div>' +
+      '<div class="seccion"><div class="seccion-cab"><h2>Interesados que coinciden</h2></div>' + (ints.length ? ints.map(function (x) {
+        return '<div class="reco"><a class="reco-cab" href="#/a/contacto/interesado/' + esc(x.i.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(x.i.Nombre) + '</span><span class="prop-sub">' + esc(x.i.Celular || 'Sin celular') + '</span></div></a>' +
+          htmlRazones(x.m.razones) + '<div class="fila-btns">' + (telLink(x.i.Celular) ? '<a class="btn chico" href="' + telLink(x.i.Celular) + '">' + ic('tel', 18) + 'Llamar</a>' : '') +
+          '<a class="btn chico" href="#/a/cita-nueva?int=' + esc(x.i.ID) + '&prp=' + esc(pr.ID) + '">' + ic('cal', 18) + 'Agendar cita</a></div></div>';
+      }).join('') : '<div class="vacio">Ningún interesado coincide todavía.</div>') + '</div>' +
+      (citas.length ? '<div class="seccion"><div class="seccion-cab"><h2>Visitas</h2></div><div class="lista">' + citas.map(function (c) {
+        var i = buscarId('Interesados', c.ID_Interesado);
+        return '<a class="item" href="#/a/cita/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(i ? i.Nombre : 'Sin interesado') + '</div><div class="item-sub">' + esc(fechaCorta(c.Fecha) + (c.Hora ? ' · ' + c.Hora : '') + ' · ' + (c.Estado || '')) + '</div></div></a>';
+      }).join('') + '</div></div>' : '') +
+      '<button class="btn peligro ancho" data-borrar>Eliminar propiedad</button></div>' + nav('propiedades'), function (app) {
+        enlazarVolver(app, '#/a/propiedades');
+        function cambiar(est) {
+          guardarRegistro('Propiedades', Object.assign({}, pr, { Estado: est })).then(function () { S.pub = null; toast(est === 'Disponible' ? 'Propiedad publicada' : 'Estado: ' + est); VISTAS.propiedad(p); });
+        }
+        var ap = app.querySelector('[data-estado]');
+        if (ap) ap.onclick = function () { cambiar('Disponible'); };
+        app.querySelector('#f_est').onchange = function (e) { cambiar(e.target.value); };
+        app.querySelector('[data-borrar]').onclick = function () {
+          if (!confirm('¿Eliminar esta propiedad? Esta acción no se puede deshacer.')) return;
+          eliminarRegistro('Propiedades', pr.ID).then(function () { S.pub = null; toast('Propiedad eliminada'); ir('#/a/propiedades'); });
+        };
+      });
+  };
+
+  VISTAS['propiedad-form'] = function (p, q) {
+    var pr = p[0] ? buscarId('Propiedades', p[0]) : null;
+    var cf = conf();
+    var duenos = T('Propietarios').slice().sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
+    var duenoSel = pr ? pr.ID_Propietario : (q.dueno || '');
+    pintar('<div class="pantalla">' + cabVolver(pr ? 'Editar propiedad' : 'Nueva propiedad') +
+      '<form class="formulario" novalidate>' +
+      campo({ n: 'ID_Propietario', l: 'Propietario', t: 'select', op: duenos.map(function (d) { return [d.ID, d.Nombre]; }).concat([['__nuevo', '+ Registrar nuevo propietario']]) }, duenoSel) +
+      '<div class="recuadro" id="nuevoDueno" hidden><span class="recuadro-titulo">Nuevo propietario</span>' + campo({ n: 'NuevoNombre', l: 'Nombre', req: true }) + campo({ n: 'NuevoCelular', l: 'Celular', t: 'tel' }) + '</div>' +
+      defsPropiedad(cf).map(function (d) { return campo(d, pr ? pr[d.n] : ''); }).join('') +
+      campo({ n: 'Estado', l: 'Estado', t: 'select', op: ESTADOS_PROP, vacio: false, req: true }, pr ? pr.Estado : 'Disponible') +
+      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar propiedad</button></div></form></div>', function (app) {
+        enlazarVolver(app, '#/a/propiedades');
+        var form = app.querySelector('form'), sel = app.querySelector('#f_ID_Propietario'), caja = app.querySelector('#nuevoDueno');
+        sel.onchange = function () { caja.hidden = sel.value !== '__nuevo'; };
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(form);
+          if (!d.Tipo) return errorForm(form, 'Elige el tipo de propiedad.');
+          var nuevo = d.ID_Propietario === '__nuevo';
+          if (nuevo && !d.NuevoNombre) return errorForm(form, 'Escribe el nombre del nuevo propietario.');
+          var paso = nuevo ? guardarRegistro('Propietarios', { Nombre: d.NuevoNombre, Celular: d.NuevoCelular, Origen: 'Agente' }) : Promise.resolve(null);
+          paso.then(function (dn) {
+            if (dn) d.ID_Propietario = dn.ID;
+            delete d.NuevoNombre; delete d.NuevoCelular;
+            if (pr) d.ID = pr.ID; else d.Origen = 'Agente';
+            return guardarRegistro('Propiedades', d);
+          }).then(function (g) {
+            S.pub = null; toast('Propiedad guardada');
+            history.replaceState(null, '', '#/a/propiedad/' + g.ID); render();
+          }).catch(function () {});
+        };
+      });
+  };
+
+  VISTAS.citas = function () {
+    var h = hoy();
+    var todas = T('Citas').slice().sort(ordenarCitas);
+    var prox = todas.filter(function (c) { return c.Fecha >= h; });
+    var pasadas = todas.filter(function (c) { return c.Fecha < h; }).reverse();
+    var porDia = {};
+    prox.forEach(function (c) { (porDia[c.Fecha] = porDia[c.Fecha] || []).push(c); });
+    var bloques = Object.keys(porDia).sort().map(function (f) {
+      var t = f === h ? 'Hoy · ' + fechaLarga(f).toLowerCase() : fechaLarga(f);
+      return '<div class="seccion"><div class="seccion-cab"><h2>' + esc(t) + '</h2></div><div class="lista">' + porDia[f].map(itemCita).join('') + '</div></div>';
+    }).join('');
+    pintar('<div class="pantalla"><div class="cab"><h1>Citas</h1></div>' +
+      '<a class="btn primario ancho" href="#/a/cita-nueva">' + ic('mas', 22) + 'Agendar cita</a>' +
+      (bloques || '<div class="vacio">No tienes citas próximas.</div>') +
+      (pasadas.length ? '<button class="btn ancho" data-pasadas>' + (S.verPasadas ? 'Ocultar citas pasadas' : 'Ver citas pasadas (' + pasadas.length + ')') + '</button>' +
+        (S.verPasadas ? '<div class="lista">' + pasadas.map(function (c) {
+          var i = buscarId('Interesados', c.ID_Interesado), pp = buscarId('Propiedades', c.ID_Propiedad);
+          return '<a class="item" href="#/a/cita/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc((i ? i.Nombre : 'Sin interesado')) + ' <span class="estado ' + esc(c.Estado) + '" style="font-size:12px">' + esc(c.Estado || '') + '</span></div><div class="item-sub">' + esc(fechaCorta(c.Fecha) + ' · ' + resumenProp(pp)) + '</div></div></a>';
+        }).join('') + '</div>' : '') : '') +
+      '</div>' + nav('citas'), function (app) {
+        var b = app.querySelector('[data-pasadas]');
+        if (b) b.onclick = function () { S.verPasadas = !S.verPasadas; VISTAS.citas(); };
+      });
+  };
+
+  function formCita(c, q) {
+    var ints = T('Interesados').slice().sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
+    var props = T('Propiedades').filter(function (p) { return p.Estado !== 'Vendido' && p.Estado !== 'Alquilado' || (c && c.ID_Propiedad === p.ID); });
+    var v = c || { ID_Interesado: q.int || '', ID_Propiedad: q.prp || '', Fecha: hoy(), Hora: '', Notas: '', Estado: 'Pendiente' };
+    function resumen(idp, idi) {
+      var p = buscarId('Propiedades', idp), i = buscarId('Interesados', idi), d = p && buscarId('Propietarios', p.ID_Propietario);
+      if (!p && !i) return '';
+      return '<div class="ficha" style="gap:6px">' + (i ? '<p class="item-sub">Interesado: <strong>' + esc(i.Nombre) + '</strong>' + (i.Celular ? ' · ' + esc(i.Celular) : '') + '</p>' : '') +
+        (p ? '<p style="font-weight:700">' + esc(resumenProp(p)) + (p.Precio ? ' · ' + dinero(p.Precio) : '') + '</p><p class="item-sub">Propietario: ' + esc(d ? d.Nombre + (d.Celular ? ' · ' + d.Celular : '') : '—') + '</p><p class="item-sub">Dirección: ' + esc(p.Direccion || '—') + '</p>' : '') + '</div>';
+    }
+    pintar('<div class="pantalla">' + cabVolver(c ? 'Cita' : 'Nueva cita') +
+      '<form class="formulario" novalidate>' +
+      campo({ n: 'ID_Interesado', l: 'Interesado', t: 'select', op: ints.map(function (i) { return [i.ID, i.Nombre + (i.Celular ? ' · ' + i.Celular : '')]; }) }, v.ID_Interesado) +
+      campo({ n: 'ID_Propiedad', l: 'Propiedad a visitar', t: 'select', op: props.map(function (p) { return [p.ID, resumenProp(p) + (p.Precio ? ' · ' + dinero(p.Precio) : '')]; }) }, v.ID_Propiedad) +
+      '<div id="resumenCita">' + resumen(v.ID_Propiedad, v.ID_Interesado) + '</div>' +
+      '<div class="dos-col">' + campo({ n: 'Fecha', l: 'Fecha', t: 'date', req: true }, v.Fecha) + campo({ n: 'Hora', l: 'Hora', t: 'time' }, v.Hora) + '</div>' +
+      campo({ n: 'Notas', l: 'Notas', t: 'area', ph: 'Llevar plano y copia literal' }, v.Notas) +
+      (c ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ESTADOS_CITA, req: true }, v.Estado || 'Pendiente') : '') +
+      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar cita</button>' + (c ? '<button class="btn peligro ancho" type="button" data-borrar>Eliminar cita</button>' : '') + '</div></form></div>', function (app) {
+        enlazarVolver(app, '#/a/citas');
+        var form = app.querySelector('form');
+        function act() { app.querySelector('#resumenCita').innerHTML = resumen(form.ID_Propiedad.value, form.ID_Interesado.value); }
+        form.ID_Propiedad.onchange = act; form.ID_Interesado.onchange = act;
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(form);
+          if (!d.Fecha) return errorForm(form, 'Elige la fecha de la cita.');
+          if (c) d.ID = c.ID; else d.Estado = 'Pendiente';
+          guardarRegistro('Citas', d).then(function () { toast('Cita guardada'); ir('#/a/citas'); }).catch(function () {});
+        };
+        var b = app.querySelector('[data-borrar]');
+        if (b) b.onclick = function () {
+          if (!confirm('¿Eliminar esta cita?')) return;
+          eliminarRegistro('Citas', c.ID).then(function () { toast('Cita eliminada'); ir('#/a/citas'); });
+        };
+      });
+  }
+  VISTAS['cita-nueva'] = function (p, q) { formCita(null, q); };
+  VISTAS.cita = function (p) {
+    var c = buscarId('Citas', p[0]);
+    if (!c) return ir('#/a/citas');
+    formCita(c, {});
+  };
+
+  function formLlamada(l, q) {
+    var cf = conf();
+    var tipo = l ? tipoDeLlamada(l) : (q.tipo || 'interesado');
+    var v = l || { ID_Contacto: q.id || '', ID_Propiedad: '', Motivo: '', Fecha: hoy(), Estado: 'Pendiente' };
+    function opciones(t) {
+      var arr = T(TABLA_DE[t]).slice().sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); }).map(function (c) {
+        return [c.ID, c.Nombre + (t === 'otro' && c.Categoria ? ' · ' + c.Categoria : '') + (c.Celular ? ' · ' + c.Celular : '')];
+      });
+      if (t === 'otro') arr.push(['__nuevo', '+ Registrar nuevo contacto']);
+      return arr;
+    }
+    var props = T('Propiedades');
+    pintar('<div class="pantalla">' + cabVolver(l ? 'Llamada' : 'Nueva llamada') +
+      '<form class="formulario" novalidate>' +
+      campo({ n: 'TipoContacto', l: '¿A quién vas a llamar?', t: 'seg', op: [['interesado', 'Interesado'], ['propietario', 'Propietario'], ['otro', 'Otro']], req: true }, tipo) +
+      '<div id="selContacto">' + campo({ n: 'ID_Contacto', l: 'Contacto', t: 'select', op: opciones(tipo), req: true, vacio: '— Elige un contacto —' }, v.ID_Contacto) + '</div>' +
+      '<div class="recuadro" id="nuevoOtro" hidden><span class="recuadro-titulo">Datos del contacto</span>' +
+      campo({ n: 'ONombre', l: 'Nombre', req: true, ph: 'Dr. Ramírez' }) + campo({ n: 'OCelular', l: 'Celular', t: 'tel', ph: '984 123 456' }) +
+      campo({ n: 'OCategoria', l: 'Categoría', t: 'select', op: cf.categoriasOtros }) + campo({ n: 'ODetalle', l: 'Detalle', t: 'area', ph: 'Notaría del centro, encargado de la minuta' }) + '</div>' +
+      campo({ n: 'Motivo', l: 'Motivo de la llamada', t: 'area', ph: 'Confirmar precio del terreno' }, v.Motivo) +
+      '<div class="dos-col">' + campo({ n: 'Fecha', l: 'Fecha', t: 'date' }, v.Fecha) +
+      campo({ n: 'ID_Propiedad', l: 'Propiedad', t: 'select', op: props.map(function (p) { return [p.ID, resumenProp(p)]; }), vacio: 'Ninguna' }, v.ID_Propiedad) + '</div>' +
+      (l ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ['Pendiente', 'Hecha'], req: true }, v.Estado || 'Pendiente') : '') +
+      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar llamada</button>' + (l ? '<button class="btn peligro ancho" type="button" data-borrar>Eliminar llamada</button>' : '') + '</div></form></div>', function (app) {
+        enlazarVolver(app, '#/a/llamadas');
+        var form = app.querySelector('form');
+        var caja = app.querySelector('#nuevoOtro');
+        function revisar() { caja.hidden = form.ID_Contacto.value !== '__nuevo'; }
+        function cambiarTipo(t) {
+          app.querySelector('#selContacto').innerHTML = campo({ n: 'ID_Contacto', l: 'Contacto', t: 'select', op: opciones(t), req: true, vacio: '— Elige un contacto —' }, '');
+          if (t === 'otro' && !T('OtrosContactos').length) form.ID_Contacto.value = '__nuevo';
+          form.ID_Contacto.onchange = revisar; revisar();
+        }
+        form.querySelectorAll('[name=TipoContacto]').forEach(function (r) { r.onchange = function () { cambiarTipo(r.value); }; });
+        form.ID_Contacto.onchange = revisar;
+        if (tipo === 'otro' && !T('OtrosContactos').length && !v.ID_Contacto) form.ID_Contacto.value = '__nuevo';
+        revisar();
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(form);
+          var t = d.TipoContacto;
+          if (!d.ID_Contacto) return errorForm(form, 'Elige a quién vas a llamar.');
+          if (d.ID_Contacto === '__nuevo' && !d.ONombre) return errorForm(form, 'Escribe el nombre del contacto.');
+          var paso = d.ID_Contacto === '__nuevo' ? guardarRegistro('OtrosContactos', { Nombre: d.ONombre, Celular: d.OCelular, Categoria: d.OCategoria, Detalle: d.ODetalle }) : Promise.resolve(null);
+          paso.then(function (nc) {
+            var reg = { TipoContacto: NOMBRE_TIPO[t], ID_Contacto: nc ? nc.ID : d.ID_Contacto, ID_Propiedad: d.ID_Propiedad, Motivo: d.Motivo, Fecha: d.Fecha, Estado: d.Estado || 'Pendiente' };
+            if (l) reg.ID = l.ID;
+            return guardarRegistro('Llamadas', reg);
+          }).then(function () { toast('Llamada guardada'); ir('#/a/llamadas'); }).catch(function () {});
+        };
+        var b = app.querySelector('[data-borrar]');
+        if (b) b.onclick = function () {
+          if (!confirm('¿Eliminar esta llamada?')) return;
+          eliminarRegistro('Llamadas', l.ID).then(function () { toast('Llamada eliminada'); ir('#/a/llamadas'); });
+        };
+      });
+  }
+  VISTAS['llamada-nueva'] = function (p, q) { formLlamada(null, q); };
+  VISTAS.llamada = function (p) {
+    var l = buscarId('Llamadas', p[0]);
+    if (!l) return ir('#/a/llamadas');
+    formLlamada(l, {});
+  };
+
+  /* ================= Modo demo (sin servidor) ================= */
+
+  var Demo = {
+    cargar: function () {
+      var db = leerJSON('inmo_demo_db');
+      if (db) return db;
+      var h = hoy(), d = function (n) { return sumarDias(h, n); };
+      db = {
+        Config: { PIN: '1234', NOMBRE_NEGOCIO: 'Mi Inmobiliaria', WHATSAPP: '51999999999', ZONAS: 'San Jerónimo, San Sebastián, Wanchaq, Santiago, Cusco Centro', CARACTERISTICAS: 'Con título, Agua, Luz, Desagüe, Pista asfaltada, Cochera, Jardín', CATEGORIAS_OTROS: 'Notario, Municipalidad, Topógrafo, Banco, Abogado, Otro agente, Otro' },
+        Propietarios: [
+          { ID: 'PRO-0001', Nombre: 'María Quispe', Celular: '984123456', Notas: '', Origen: 'Agente', FechaRegistro: d(-20) },
+          { ID: 'PRO-0002', Nombre: 'Pedro Ccahua', Celular: '974555210', Notas: '', Origen: 'Agente', FechaRegistro: d(-15) },
+          { ID: 'PRO-0003', Nombre: 'Ana Torres', Celular: '951330778', Notas: '', Origen: 'Agente', FechaRegistro: d(-10) },
+          { ID: 'PRO-0004', Nombre: 'Julia Mendoza', Celular: '962410337', Notas: '', Origen: 'App', FechaRegistro: d(-1) }
+        ],
+        Interesados: [
+          { ID: 'INT-0001', Nombre: 'Juan Pérez', Celular: '987654321', Operacion: 'Venta', Tipo: 'Terreno', Zonas: 'San Jerónimo, San Sebastián', PresupuestoMax: '150000', AreaMin: '150', DormitoriosMin: '', Caracteristicas: 'Con título, Agua', Notas: '', Origen: 'Agente', FechaRegistro: d(-12) },
+          { ID: 'INT-0002', Nombre: 'Rosa Mamani', Celular: '965112449', Operacion: 'Venta', Tipo: 'Casa', Zonas: 'Wanchaq', PresupuestoMax: '260000', AreaMin: '', DormitoriosMin: '3', Caracteristicas: 'Cochera', Notas: '', Origen: 'Agente', FechaRegistro: d(-9) },
+          { ID: 'INT-0003', Nombre: 'Luis Condori', Celular: '942870615', Operacion: 'Venta', Tipo: 'Casa', Zonas: '', PresupuestoMax: '250000', AreaMin: '', DormitoriosMin: '', Caracteristicas: '', Notas: '', Origen: 'App', FechaRegistro: d(-2) },
+          { ID: 'INT-0004', Nombre: 'Carlos Huamán', Celular: '958221904', Operacion: 'Venta', Tipo: 'Departamento', Zonas: 'Santiago, Wanchaq', PresupuestoMax: '200000', AreaMin: '', DormitoriosMin: '2', Caracteristicas: '', Notas: '', Origen: 'Agente', FechaRegistro: d(-6) }
+        ],
+        OtrosContactos: [
+          { ID: 'OTR-0001', Nombre: 'Dr. Ramírez', Celular: '984700120', Categoria: 'Notario', Detalle: 'Notaría del centro', FechaRegistro: d(-30) },
+          { ID: 'OTR-0002', Nombre: 'Jorge Huallpa', Celular: '973450882', Categoria: 'Topógrafo', Detalle: 'Planos y linderos', FechaRegistro: d(-25) }
+        ],
+        Propiedades: [
+          { ID: 'PRP-0001', ID_Propietario: 'PRO-0001', Operacion: 'Venta', Tipo: 'Terreno', Zona: 'San Jerónimo', Direccion: 'Calle Los Pinos s/n', Area: '200', Dormitorios: '', Precio: '120000', Caracteristicas: 'Con título, Agua, Luz', Descripcion: 'Terreno plano, cerca a la avenida principal.', Estado: 'Disponible', Origen: 'Agente', FechaRegistro: d(-20) },
+          { ID: 'PRP-0002', ID_Propietario: 'PRO-0002', Operacion: 'Venta', Tipo: 'Casa', Zona: 'Wanchaq', Direccion: 'Jr. Los Álamos 210', Area: '160', Dormitorios: '3', Precio: '240000', Caracteristicas: 'Con título, Agua, Luz, Desagüe, Cochera', Descripcion: 'Casa de dos pisos con patio.', Estado: 'Disponible', Origen: 'Agente', FechaRegistro: d(-15) },
+          { ID: 'PRP-0003', ID_Propietario: 'PRO-0003', Operacion: 'Venta', Tipo: 'Departamento', Zona: 'Santiago', Direccion: 'Av. Antonio Lorena 455', Area: '85', Dormitorios: '2', Precio: '180000', Caracteristicas: 'Agua, Luz, Desagüe', Descripcion: '', Estado: 'Reservado', Origen: 'Agente', FechaRegistro: d(-10) },
+          { ID: 'PRP-0004', ID_Propietario: 'PRO-0001', Operacion: 'Venta', Tipo: 'Terreno', Zona: 'San Sebastián', Direccion: '', Area: '300', Dormitorios: '', Precio: '185000', Caracteristicas: 'Con título, Agua', Descripcion: '', Estado: 'Disponible', Origen: 'Agente', FechaRegistro: d(-8) },
+          { ID: 'PRP-0005', ID_Propietario: 'PRO-0004', Operacion: 'Alquiler', Tipo: 'Departamento', Zona: 'Wanchaq', Direccion: 'Calle Tacna 120', Area: '70', Dormitorios: '2', Precio: '1500', Caracteristicas: 'Agua, Luz', Descripcion: 'Departamento amoblado.', Estado: 'Pendiente', Origen: 'App', FechaRegistro: d(-1) }
+        ],
+        Citas: [
+          { ID: 'CIT-0001', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0001', Fecha: h, Hora: '10:00', Notas: 'Llevar plano', Estado: 'Pendiente', FechaRegistro: d(-3) },
+          { ID: 'CIT-0002', ID_Interesado: 'INT-0002', ID_Propiedad: 'PRP-0002', Fecha: h, Hora: '12:30', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-2) },
+          { ID: 'CIT-0003', ID_Interesado: 'INT-0004', ID_Propiedad: 'PRP-0003', Fecha: h, Hora: '16:00', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-2) },
+          { ID: 'CIT-0004', ID_Interesado: 'INT-0003', ID_Propiedad: 'PRP-0002', Fecha: d(2), Hora: '09:30', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-1) },
+          { ID: 'CIT-0005', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0004', Fecha: d(7), Hora: '10:00', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-1) }
+        ],
+        Llamadas: [
+          { ID: 'LLA-0001', TipoContacto: 'Interesado', ID_Contacto: 'INT-0002', ID_Propiedad: 'PRP-0002', Motivo: 'Enviar más datos de la casa en Wanchaq', Fecha: d(-1), Estado: 'Pendiente', FechaRegistro: d(-3) },
+          { ID: 'LLA-0002', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0001', ID_Propiedad: 'PRP-0001', Motivo: 'Confirmar precio del terreno', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
+          { ID: 'LLA-0003', TipoContacto: 'Interesado', ID_Contacto: 'INT-0003', ID_Propiedad: '', Motivo: 'Ofrecer casas hasta S/ 250 000', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
+          { ID: 'LLA-0004', TipoContacto: 'Otro', ID_Contacto: 'OTR-0001', ID_Propiedad: 'PRP-0004', Motivo: 'Ver minuta del terreno de San Sebastián', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
+          { ID: 'LLA-0005', TipoContacto: 'Otro', ID_Contacto: 'OTR-0002', ID_Propiedad: '', Motivo: 'Cotizar plano perimétrico', Fecha: d(3), Estado: 'Pendiente', FechaRegistro: d(-1) }
+        ]
+      };
+      Demo.guardar(db);
+      return db;
+    },
+    guardar: function (db) { guardarLocal('inmo_demo_db', JSON.stringify(db)); },
+    prefijos: { Propietarios: 'PRO', Interesados: 'INT', OtrosContactos: 'OTR', Propiedades: 'PRP', Citas: 'CIT', Llamadas: 'LLA' },
+    config: function (c) {
+      return { negocio: c.NOMBRE_NEGOCIO, whatsapp: c.WHATSAPP, zonas: lista(c.ZONAS), caracteristicas: lista(c.CARACTERISTICAS), categoriasOtros: lista(c.CATEGORIAS_OTROS) };
+    },
+    insertar: function (db, tabla, reg) {
+      var pre = Demo.prefijos[tabla], arr = db[tabla], i = -1;
+      if (reg.ID) i = arr.findIndex(function (x) { return x.ID === reg.ID; });
+      if (i >= 0) { arr[i] = Object.assign({}, arr[i], reg); Demo.guardar(db); return arr[i]; }
+      var max = arr.reduce(function (m, x) { return Math.max(m, parseInt(String(x.ID).split('-')[1], 10) || 0); }, 0);
+      var nuevo = Object.assign({}, reg, { ID: pre + '-' + ('0000' + (max + 1)).slice(-4), FechaRegistro: hoy() + ' ' + pad(new Date().getHours()) + ':' + pad(new Date().getMinutes()) });
+      arr.push(nuevo); Demo.guardar(db); return nuevo;
+    },
+    manejar: function (req) {
+      var db = Demo.cargar(), d = req.data || {};
+      var a = req.action;
+      if (a === 'publico') return { ok: true, data: { config: Demo.config(db.Config), Propiedades: db.Propiedades.filter(function (p) { return p.Estado === 'Disponible'; }) } };
+      if (a === 'publicarPropiedad') {
+        var pr = Demo.insertar(db, 'Propietarios', { Nombre: d.Nombre, Celular: d.Celular, Notas: '', Origen: 'App' });
+        Demo.insertar(db, 'Propiedades', { ID_Propietario: pr.ID, Operacion: d.Operacion, Tipo: d.Tipo, Zona: d.Zona, Direccion: d.Direccion, Area: d.Area, Dormitorios: d.Dormitorios, Precio: d.Precio, Caracteristicas: d.Caracteristicas, Descripcion: d.Descripcion, Estado: 'Pendiente', Origen: 'App' });
+        return { ok: true };
+      }
+      if (a === 'registrarInteres') {
+        var r = {}; ['Nombre', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (k) { r[k] = d[k] || ''; });
+        r.Origen = 'App'; Demo.insertar(db, 'Interesados', r); return { ok: true };
+      }
+      if (String(req.pin) !== db.Config.PIN) return { ok: false, error: 'PIN incorrecto.', auth: false };
+      if (a === 'login') return { ok: true };
+      if (a === 'todo') {
+        var o = { config: Demo.config(db.Config) };
+        Object.keys(Demo.prefijos).forEach(function (t) { o[t] = db[t].map(function (x) { return Object.assign({}, x); }); });
+        return { ok: true, data: o };
+      }
+      if (a === 'guardar') {
+        if (!Demo.prefijos[d.tabla]) return { ok: false, error: 'Tabla no válida.' };
+        return { ok: true, data: Object.assign({}, Demo.insertar(db, d.tabla, d.registro || {})) };
+      }
+      if (a === 'eliminar') {
+        db[d.tabla] = db[d.tabla].filter(function (x) { return x.ID !== d.id; }); Demo.guardar(db); return { ok: true };
+      }
+      return { ok: false, error: 'Acción desconocida.' };
+    }
+  };
+
+  /* ================= Inicio ================= */
+
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js').catch(function () {});
+  }
+  if (typeof module !== 'undefined') module.exports = { coincidencia: coincidencia, recomendarPara: recomendarPara, Demo: Demo };
+  else render();
+})();
