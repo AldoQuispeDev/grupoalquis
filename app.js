@@ -13,6 +13,12 @@
   var CONTACTO_DE_CITA = { 'Visita': 'interesado', 'Captación': 'propietario' };
   var AYUDA_CITA = { 'Visita': 'Con un interesado, para mostrarle una propiedad.', 'Captación': 'Con un propietario, para conocer o captar su propiedad.', 'Reunión': 'Con cualquier contacto: interesado, propietario u otro.' };
   var ESTADOS_RESERVA = ['Activa', 'Concretada', 'Cancelada'];
+  // Temperatura del interesado: los botones van de Frío a Caliente; las listas ordenan de Caliente a Frío.
+  var TEMPERATURAS = ['Frío', 'Tibio', 'Caliente'];
+  var RANGO_TEMP = { 'Caliente': 0, 'Tibio': 1, 'Frío': 2 };
+  var CLASE_TEMP = { 'Frío': 'frio', 'Tibio': 'tibio', 'Caliente': 'caliente' };
+  var AYUDA_TEMP = { 'Frío': 'Aún no conoce la propiedad', 'Tibio': 'Ya la conoce y está algo interesado', 'Caliente': 'Tiene interés real en comprar' };
+  var QUE_PASO = [['realizada', 'Se realizó'], ['reprogramada', 'Se reprogramó'], ['noAsistio', 'No asistió']];
   var TABLA_DE = { propietario: 'Propietarios', interesado: 'Interesados', otro: 'OtrosContactos' };
   var NOMBRE_TIPO = { propietario: 'Propietario', interesado: 'Interesado', otro: 'Otro' };
   var MARCA = 'Grupo Alquis Perú';
@@ -28,8 +34,10 @@
     filtrosPub: { estado: '', operacion: '', tipo: '', zona: '', precioMax: '' },
     tabContactos: 'interesado',
     qContactos: '',
+    filtroTemp: '',
     verPasadas: false,
-    verHechas: false
+    verHechas: false,
+    verPorCerrar: false
   };
 
   /* ================= Utilidades ================= */
@@ -203,7 +211,7 @@
   function interesadosPara(p, ints) {
     return ints.map(function (i) { var m = coincidencia(i, p); return m ? { i: i, m: m } : null; })
       .filter(function (x) { return x && x.m.puntaje != null && x.m.puntaje >= 40; })
-      .sort(function (a, b) { return b.m.puntaje - a.m.puntaje; });
+      .sort(function (a, b) { return RANGO_TEMP[temperatura(a.i)] - RANGO_TEMP[temperatura(b.i)] || b.m.puntaje - a.m.puntaje; });
   }
 
   function htmlRazones(rs) {
@@ -346,6 +354,31 @@
   function etiquetaReservado(p) {
     return esIso(p.FechaLimite) && p.FechaLimite >= hoy() ? 'Reservado hasta el ' + fechaTexto(p.FechaLimite) : 'Reservado';
   }
+  // Sin valor (interesados antiguos o del formulario público) cuenta como "Frío".
+  function temperatura(i) {
+    var t = String((i && i.Temperatura) || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+    return t === 'caliente' ? 'Caliente' : (t === 'tibio' ? 'Tibio' : 'Frío');
+  }
+  function tagTemp(i) {
+    var t = temperatura(i);
+    return '<span class="tag-temp ' + CLASE_TEMP[t] + '">' + t + '</span>';
+  }
+  function horaDe(c) { var m = /^(\d{1,2}):(\d{2})/.exec(String(c.Hora || '')); return m ? pad(+m[1]) + ':' + m[2] : ''; }
+  // Una cita sin hora se considera pasada recién al día siguiente.
+  function yaPaso(c) {
+    if (!esIso(c.Fecha)) return false;
+    var h = hoy();
+    if (c.Fecha !== h) return c.Fecha < h;
+    var hr = horaDe(c), n = new Date();
+    return !!hr && hr <= pad(n.getHours()) + ':' + pad(n.getMinutes());
+  }
+  function citaPendiente(c) { return (c.Estado || 'Pendiente') === 'Pendiente'; }
+  function porCerrar(c) { return citaPendiente(c) && yaPaso(c); }
+  function faltaResultado(c) { return yaPaso(c) && c.Estado !== 'Cancelada' && (citaPendiente(c) || !String(c.Resultado || '').trim()); }
+  function textoNoAsistio(t) {
+    t = String(t == null ? '' : t).trim();
+    return /^no asistió/i.test(t) ? t : 'No asistió' + (t ? '. ' + t : '');
+  }
 
   /* ================= Router ================= */
 
@@ -419,9 +452,14 @@
         return '<label><input type="checkbox" name="' + def.n + '" value="' + esc(o) + '"' + (sel.indexOf(o) >= 0 ? ' checked' : '') + '><span>' + esc(o) + '</span></label>';
       }).join('') : '<span class="item-sub">Agrega opciones en la pestaña Config de tu hoja.</span>') + '</div>';
     } else if (def.t === 'seg') {
-      h = '<span class="etiqueta">' + esc(def.l) + opc + '</span><div class="segmento' + (def.op.length === 2 ? ' dos' : '') + '">' + def.op.map(function (o) {
+      h = '<span class="etiqueta">' + esc(def.l) + opc + '</span><div class="segmento' + (def.op.length === 2 ? ' dos' : '') + (def.clase ? ' ' + def.clase : '') + '">' + def.op.map(function (o) {
         var val = typeof o === 'string' ? o : o[0], txt = typeof o === 'string' ? o : o[1];
         return '<label><input type="radio" name="' + def.n + '" value="' + esc(val) + '"' + (String(v) === String(val) ? ' checked' : '') + '><span>' + esc(txt) + '</span></label>';
+      }).join('') + '</div>';
+    } else if (def.t === 'temp') {
+      var tv = temperatura({ Temperatura: v });
+      h = '<span class="etiqueta">' + esc(def.l || 'Nivel de interés') + '</span><div class="segmento temp">' + TEMPERATURAS.map(function (t) {
+        return '<label class="' + CLASE_TEMP[t] + '"><input type="radio" name="' + def.n + '" value="' + t + '"' + (t === tv ? ' checked' : '') + '><span><strong>' + t + '</strong><small>' + AYUDA_TEMP[t] + '</small></span></label>';
       }).join('') + '</div>';
     } else if (def.t === 'area') {
       h = et + '<textarea id="' + id + '" name="' + def.n + '" rows="3" placeholder="' + esc(def.ph || '') + '">' + esc(v) + '</textarea>';
@@ -483,6 +521,12 @@
       { n: 'DormitoriosMin', l: 'Dormitorios mínimos', t: 'num', ph: '2' },
       { n: 'Caracteristicas', l: 'Características que desea', t: 'multi', op: c.caracteristicas }
     ];
+  }
+  // Formulario del agente: el nivel de interés va justo después del nombre y el celular.
+  function defsInteresadoAgente(c) {
+    var defs = defsInteresado(c);
+    defs.splice(2, 0, { n: 'Temperatura', t: 'temp' }, { n: 'DetalleInteres', l: 'Describe su interés', t: 'area', ph: 'Visitó el terreno y le gustó; espera su gratificación para separar' });
+    return defs;
   }
   function defsPropiedad(c) {
     return [
@@ -698,19 +742,48 @@
     var tc = tipoDeCita(c);
     return '<span class="tag-cita ' + (CLASE_CITA[tc] || 'visita') + '">' + esc(tc) + '</span>';
   }
+  function propDeCita(c) {
+    var p = buscarId('Propiedades', c.ID_Propiedad);
+    return p ? resumenProp(p) : (tipoDeCita(c) === 'Captación' ? 'Propiedad aún no registrada' : 'Sin propiedad');
+  }
+  // Nombre del contacto de la cita y su etiqueta de temperatura, si es un interesado.
+  function partesCita(c) {
+    var k = contactoDeCita(c), ct = contacto(k.tipo, k.id);
+    return {
+      k: k, ct: ct,
+      nombre: ct ? ct.Nombre : (k.id ? 'Contacto eliminado' : 'Sin ' + NOMBRE_TIPO[k.tipo].toLowerCase()),
+      temp: k.tipo === 'interesado' && ct ? ' ' + tagTemp(ct) : '',
+      cuando: fechaCorta(c.Fecha) + (c.Hora ? ' · ' + c.Hora : '')
+    };
+  }
+  var MARCA_FALTA = '<span class="falta-resultado">Falta resultado</span>';
+
   // modo: '' muestra la hora a la izquierda (agenda del día), 'fecha' agrega el día, 'contacto' pone la fecha como título.
   function itemCita(c, modo) {
-    var k = contactoDeCita(c), ct = contacto(k.tipo, k.id), p = buscarId('Propiedades', c.ID_Propiedad);
+    var x = partesCita(c), k = x.k, ct = x.ct;
     var tc = tipoDeCita(c), tel = ct && telLink(ct.Celular);
-    var cuando = fechaCorta(c.Fecha) + (c.Hora ? ' · ' + c.Hora : '');
-    var nombre = ct ? ct.Nombre : (k.id ? 'Contacto eliminado' : 'Sin ' + NOMBRE_TIPO[k.tipo].toLowerCase());
-    var sub = p ? resumenProp(p) : (tc === 'Captación' ? 'Propiedad aún no registrada' : 'Sin propiedad');
+    var sub = propDeCita(c);
     if (tc === 'Reunión' && modo !== 'contacto') sub = NOMBRE_TIPO[k.tipo] + (k.tipo === 'otro' && ct && ct.Categoria ? ' (' + ct.Categoria + ')' : '') + ' · ' + sub;
-    if (modo === 'fecha') sub = cuando + ' · ' + sub;
+    if (modo === 'fecha') sub = x.cuando + ' · ' + sub;
     return '<div class="item"><a href="#/a/cita/' + esc(c.ID) + '" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;text-decoration:none;color:inherit">' +
-      (modo ? '' : '<span class="hora">' + esc(c.Hora || '—') + '</span>') + '<div class="item-cuerpo"><div class="item-titulo">' + esc(modo === 'contacto' ? cuando : nombre) + ' ' + tagCita(c) +
-      (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado chico ' + esc(c.Estado) + '">' + esc(c.Estado) + '</span>' : '') + '</div><div class="item-sub">' + esc(sub) + '</div></div></a>' +
+      (modo ? '' : '<span class="hora">' + esc(c.Hora || '—') + '</span>') + '<div class="item-cuerpo"><div class="item-titulo">' + (modo === 'contacto' ? esc(x.cuando) : esc(x.nombre) + x.temp) + ' ' + tagCita(c) +
+      (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado chico ' + esc(c.Estado) + '">' + esc(c.Estado) + '</span>' : '') + '</div><div class="item-sub">' + (faltaResultado(c) ? MARCA_FALTA + ' · ' : '') + esc(sub) + '</div></div></a>' +
       (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar a ' + esc(ct.Nombre) + '">' + ic('tel', 20) + '</a>' : '') + '</div>';
+  }
+
+  // Inicio > ¿Cómo te fue?: toda la fila abre la pantalla para cerrar la cita.
+  function itemPorCerrar(c) {
+    var x = partesCita(c);
+    return '<a class="item" href="#/a/como-te-fue/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(x.nombre) + x.temp + ' ' + tagCita(c) + '</div>' +
+      '<div class="item-sub">' + esc(x.cuando + ' · ' + propDeCita(c)) + '</div></div><span class="btn chico pildora">¿Cómo te fue?</span></a>';
+  }
+
+  // Historial del interesado: cada cita con su estado y lo que se anotó en Resultado.
+  function itemHistorial(c) {
+    var est = c.Estado || 'Pendiente', res = String(c.Resultado || '').trim();
+    return '<a class="item arriba" href="#/a/cita/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(fechaCorta(c.Fecha) + (c.Hora ? ' · ' + c.Hora : '')) + ' ' + tagCita(c) +
+      ' <span class="estado chico ' + esc(est) + '">' + esc(est) + '</span></div><div class="item-sub">' + esc(propDeCita(c)) + '</div>' +
+      (res ? '<p class="resultado">' + esc(res) + '</p>' : (faltaResultado(c) ? '<div class="item-sub">' + MARCA_FALTA + '</div>' : '')) + '</div></a>';
   }
 
   // modo: 'inicio' (reservas por vencer), 'interesado' (en su ficha) o 'propiedad' (historial de la propiedad).
@@ -759,6 +832,8 @@
     var en3 = sumarDias(h, 3);
     var porVencer = T('Reservas').filter(function (r) { return r.Estado === 'Activa' && esIso(r.FechaLimite) && r.FechaLimite <= en3; })
       .sort(function (a, b) { return a.FechaLimite.localeCompare(b.FechaLimite); });
+    var cerrar = T('Citas').filter(porCerrar).sort(ordenarCitas).reverse();
+    var cerrarVer = S.verPorCerrar ? cerrar : cerrar.slice(0, 5);
     var hace7 = sumarDias(h, -7);
     var nuevosInt = T('Interesados').filter(function (i) { return i.Origen === 'App' && String(i.FechaRegistro).slice(0, 10) >= hace7; });
     var nuevos = porAprobar.map(function (p) {
@@ -771,6 +846,9 @@
       '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a></div>' + avisoDemo() +
       '<div class="metricas"><a class="metrica" href="#/a/citas"><span>Citas hoy</span><strong>' + citasHoy.length + '</strong></a>' +
       '<a class="metrica naranja" href="#/a/llamadas"><span>Llamadas pendientes</span><strong>' + pend.length + '</strong></a></div>' +
+      (cerrar.length ? '<div class="seccion"><div class="seccion-cab"><h2>¿Cómo te fue?</h2>' +
+        (cerrar.length > 5 ? '<button class="ver-todo" data-ver-cerrar>' + (S.verPorCerrar ? 'Ver menos' : 'Ver todas (' + cerrar.length + ')') + '</button>' : '') + '</div>' +
+        '<p class="item-sub">Citas que ya pasaron y siguen pendientes. Anota cómo te fue.</p><div class="lista">' + cerrarVer.map(itemPorCerrar).join('') + '</div></div>' : '') +
       (nuevos.length ? '<div class="seccion"><div class="seccion-cab"><h2>Nuevos desde la app</h2></div><div class="lista">' + nuevos.join('') + '</div></div>' : '') +
       '<div class="seccion"><div class="seccion-cab"><h2>Citas de hoy</h2><a class="ver-todo" href="#/a/citas">Ver todo</a></div>' +
       (citasHoy.length ? '<div class="lista">' + citasHoy.map(function (c) { return itemCita(c); }).join('') + '</div>' : '<div class="vacio">No tienes citas hoy. <a href="#/a/cita-nueva">Agendar una cita</a></div>') + '</div>' +
@@ -782,6 +860,8 @@
       '<div class="fila-btns"><button class="btn chico" data-recargar>' + ic('recargar', 18) + 'Actualizar datos</button><button class="btn chico peligro" data-salir>' + ic('salir', 18) + 'Cerrar sesión</button></div></div>' +
       '</div>' + nav('inicio'), function (app) {
         enlazarChecks(app, VISTAS.inicio);
+        var vc = app.querySelector('[data-ver-cerrar]');
+        if (vc) vc.onclick = function () { S.verPorCerrar = !S.verPorCerrar; VISTAS.inicio(); };
         app.querySelector('[data-catalogo]').onclick = function (e) { e.preventDefault(); S.pub = null; location.hash = '#/catalogo'; };
         app.querySelector('[data-recargar]').onclick = function () { S.pub = null; cargarDb(true); toast('Actualizando…'); };
         app.querySelector('[data-salir]').onclick = function () { if (confirm('¿Cerrar sesión en este celular?')) salirAgente(); };
@@ -850,7 +930,9 @@
   VISTAS.contactos = function (p, q) {
     if (q.tab) S.tabContactos = q.tab;
     var tab = S.tabContactos, qq = S.qContactos.toLowerCase();
+    var ft = tab === 'interesado' ? S.filtroTemp : '';
     var filas = T(TABLA_DE[tab]).filter(function (c) {
+      if (ft && temperatura(c) !== ft) return false;
       return !qq || (c.Nombre + ' ' + c.Celular + ' ' + (c.Categoria || '')).toLowerCase().indexOf(qq) >= 0;
     }).sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
     var html = filas.map(function (c) {
@@ -863,16 +945,20 @@
       }
       if (tab === 'otro') extra = [c.Categoria, c.Detalle].filter(Boolean).join(' · ');
       return '<a class="item" href="#/a/contacto/' + tab + '/' + esc(c.ID) + '"><span class="avatar ' + tab + '">' + esc(iniciales(c.Nombre)) + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(c.Nombre) +
-        (c.Origen === 'App' ? ' <span class="tag app">App</span>' : '') + '</div><div class="item-sub">' + esc(sub) + '</div>' + (extra ? '<div class="item-sub">' + esc(extra) + '</div>' : '') + '</div></a>';
+        (tab === 'interesado' ? ' ' + tagTemp(c) : '') + (c.Origen === 'App' ? ' <span class="tag app">App</span>' : '') + '</div><div class="item-sub">' + esc(sub) + '</div>' + (extra ? '<div class="item-sub">' + esc(extra) + '</div>' : '') + '</div></a>';
     }).join('');
     pintar('<div class="pantalla"><div class="cab"><h1>Contactos</h1><a class="btn-redondo" href="#/a/contacto-form/' + tab + '" aria-label="Registrar contacto">' + ic('mas', 26) + '</a></div>' +
       '<div class="pestanas" role="tablist">' + ['interesado', 'propietario', 'otro'].map(function (t) {
         return '<button role="tab" aria-selected="' + (t === tab) + '" class="' + (t === tab ? 'activo' : '') + '" data-tab="' + t + '">' + { interesado: 'Interesados', propietario: 'Propietarios', otro: 'Otros' }[t] + '</button>';
       }).join('') + '</div>' +
       '<div class="caja-busqueda">' + ic('buscar', 20) + '<input id="qc" type="search" placeholder="Buscar por nombre o celular" aria-label="Buscar contacto" value="' + esc(S.qContactos) + '"></div>' +
-      (html ? '<div class="lista">' + html + '</div>' : '<div class="vacio">' + (qq ? 'Sin resultados para esa búsqueda.' : 'Aún no tienes contactos aquí. Toca + para registrar el primero.') + '</div>') +
+      (tab === 'interesado' ? '<div class="chips" role="group" aria-label="Nivel de interés">' + [''].concat(TEMPERATURAS.slice().reverse()).map(function (t) {
+        return '<button class="chip' + (ft === t ? ' activo' : '') + '" data-temp="' + t + '" aria-pressed="' + (ft === t) + '">' + (t ? '<span class="punto ' + CLASE_TEMP[t] + '"></span>' + t : 'Todos') + '</button>';
+      }).join('') + '</div>' : '') +
+      (html ? '<div class="lista">' + html + '</div>' : '<div class="vacio">' + (qq ? 'Sin resultados para esa búsqueda.' : (ft ? 'No hay interesados con nivel de interés ' + ft.toLowerCase() + '.' : 'Aún no tienes contactos aquí. Toca + para registrar el primero.')) + '</div>') +
       '</div>' + nav('contactos'), function (app) {
         app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { S.tabContactos = b.dataset.tab; VISTAS.contactos([], {}); }; });
+        app.querySelectorAll('[data-temp]').forEach(function (b) { b.onclick = function () { S.filtroTemp = b.dataset.temp; VISTAS.contactos([], {}); }; });
         var inp = app.querySelector('#qc');
         inp.oninput = function () {
           S.qContactos = inp.value; var pos = inp.selectionStart; VISTAS.contactos([], {});
@@ -888,7 +974,8 @@
     var datos = '<dt>Celular</dt><dd>' + esc(c.Celular || '—') + '</dd>';
     var extra = '';
     if (tipo === 'interesado') {
-      datos += '<dt>Operación</dt><dd>' + esc(c.Operacion === 'Venta' ? 'Comprar' : (c.Operacion === 'Alquiler' ? 'Alquilar' : '—')) + '</dd>' +
+      datos += '<dt>Nivel de interés</dt><dd>' + tagTemp(c) + (c.DetalleInteres ? '<br>' + esc(c.DetalleInteres) : '') + '</dd>' +
+        '<dt>Operación</dt><dd>' + esc(c.Operacion === 'Venta' ? 'Comprar' : (c.Operacion === 'Alquiler' ? 'Alquilar' : '—')) + '</dd>' +
         '<dt>Busca</dt><dd>' + esc(c.Tipo || '—') + '</dd><dt>Zonas</dt><dd>' + esc(c.Zonas || '—') + '</dd>' +
         '<dt>Presupuesto</dt><dd>' + esc(dinero(c.PresupuestoMax) || '—') + '</dd><dt>Área mínima</dt><dd>' + esc(c.AreaMin ? c.AreaMin + ' m²' : '—') + '</dd>' +
         '<dt>Dormitorios</dt><dd>' + esc(c.DormitoriosMin || '—') + '</dd><dt>Desea</dt><dd>' + esc(c.Caracteristicas || '—') + '</dd>';
@@ -905,7 +992,9 @@
         (props.length ? '<div class="lista-props">' + props.map(tarjetaAgente).join('') + '</div>' : '<div class="vacio">Sin propiedades registradas.</div>') + '</div>';
     }
     var citas = citasDe(tipo, c.ID);
-    if (citas.length) extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus citas</h2></div><div class="lista">' + citas.map(function (x) { return itemCita(x, 'contacto'); }).join('') + '</div></div>';
+    if (tipo === 'interesado') extra += '<div class="seccion"><div class="seccion-cab"><h2>Historial</h2></div>' +
+      (citas.length ? '<div class="lista">' + citas.reverse().map(itemHistorial).join('') + '</div>' : '<div class="vacio">Aún no tiene citas.</div>') + '</div>';
+    else if (citas.length) extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus citas</h2></div><div class="lista">' + citas.map(function (x) { return itemCita(x, 'contacto'); }).join('') + '</div></div>';
     if (tipo === 'interesado') {
       var reservas = T('Reservas').filter(function (r) { return r.ID_Interesado === c.ID; }).sort(ordenarReservas);
       if (reservas.length) extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus reservas</h2></div><div class="lista">' + reservas.map(function (r) { return itemReserva(r, 'interesado'); }).join('') + '</div></div>';
@@ -915,7 +1004,7 @@
     if (c.Notas) datos += '<dt>Notas</dt><dd>' + esc(c.Notas) + '</dd>';
     datos += '<dt>Registrado</dt><dd>' + esc(String(c.FechaRegistro || '').slice(0, 10) || '—') + (c.Origen === 'App' ? ' (desde la app)' : '') + '</dd>';
     pintar('<div class="pantalla">' + cabVolver(NOMBRE_TIPO[tipo], '<a class="btn-icono borde" href="#/a/contacto-form/' + tipo + '/' + esc(c.ID) + '" aria-label="Editar">' + ic('lapiz', 20) + '</a>') +
-      '<div class="ficha"><div class="ficha-top"><span class="avatar ' + tipo + '">' + esc(iniciales(c.Nombre)) + '</span><h2>' + esc(c.Nombre) + '</h2></div>' +
+      '<div class="ficha"><div class="ficha-top"><span class="avatar ' + tipo + '">' + esc(iniciales(c.Nombre)) + '</span><div><h2>' + esc(c.Nombre) + '</h2>' + (tipo === 'interesado' ? tagTemp(c) : '') + '</div></div>' +
       (tel || wsp ? '<div class="fila-btns">' + (tel ? '<a class="btn chico" href="' + tel + '">' + ic('tel', 18) + 'Llamar</a>' : '') + (wsp ? '<a class="btn chico" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp', 18) + 'WhatsApp</a>' : '') + '</div>' : '') +
       '<dl class="datos">' + datos + '</dl>' +
       '<div class="fila-btns"><a class="btn chico" href="#/a/llamada-nueva?tipo=' + tipo + '&id=' + esc(c.ID) + '">' + ic('llamadas', 18) + 'Programar llamada</a>' +
@@ -933,7 +1022,7 @@
     var tipo = p[0] || 'interesado', c = p[1] ? contacto(tipo, p[1]) : null;
     var cf = conf();
     var defs;
-    if (tipo === 'interesado') defs = defsInteresado(cf).concat([{ n: 'Notas', l: 'Notas', t: 'area' }]);
+    if (tipo === 'interesado') defs = defsInteresadoAgente(cf).concat([{ n: 'Notas', l: 'Notas', t: 'area' }]);
     else if (tipo === 'propietario') defs = [{ n: 'Nombre', l: 'Nombre', req: true, ph: 'María Quispe' }, { n: 'Celular', l: 'Celular', t: 'tel', ph: '984 123 456' }, { n: 'Notas', l: 'Notas', t: 'area' }];
     else defs = [{ n: 'Nombre', l: 'Nombre', req: true, ph: 'Dr. Ramírez' }, { n: 'Celular', l: 'Celular', t: 'tel', ph: '984 700 120' }, { n: 'Categoria', l: 'Categoría', t: 'select', op: cf.categoriasOtros }, { n: 'Detalle', l: 'Detalle', t: 'area', ph: 'Notaría del centro' }];
     var titulo = (c ? 'Editar ' : 'Nuevo ') + NOMBRE_TIPO[tipo].toLowerCase();
@@ -1049,7 +1138,8 @@
         : '<div class="campo"><label for="f_est">Cambiar estado</label><select id="f_est">' + ESTADOS_PROP.map(function (e) { return '<option' + (e === pr.Estado ? ' selected' : '') + '>' + e + '</option>'; }).join('') + '</select></div>') + '</div>' +
       bloqueReserva +
       '<div class="seccion"><div class="seccion-cab"><h2>Interesados que coinciden</h2></div>' + (ints.length ? ints.map(function (x) {
-        return '<div class="reco"><a class="reco-cab" href="#/a/contacto/interesado/' + esc(x.i.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(x.i.Nombre) + '</span><span class="prop-sub">' + esc(x.i.Celular || 'Sin celular') + '</span></div></a>' +
+        return '<div class="reco"><a class="reco-cab" href="#/a/contacto/interesado/' + esc(x.i.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(x.i.Nombre) + ' ' + tagTemp(x.i) + '</span><span class="prop-sub">' + esc(x.i.Celular || 'Sin celular') + '</span>' +
+          (x.i.DetalleInteres ? '<span class="prop-sub">' + esc(x.i.DetalleInteres) + '</span>' : '') + '</div></a>' +
           htmlRazones(x.m.razones) + '<div class="fila-btns">' + (telLink(x.i.Celular) ? '<a class="btn chico" href="' + telLink(x.i.Celular) + '">' + ic('tel', 18) + 'Llamar</a>' : '') +
           '<a class="btn chico" href="#/a/cita-nueva?tipo=visita&ct=interesado&id=' + esc(x.i.ID) + '&prp=' + esc(pr.ID) + '">' + ic('cal', 18) + 'Agendar cita</a></div></div>';
       }).join('') : '<div class="vacio">Ningún interesado coincide todavía.</div>') + '</div>' +
@@ -1182,10 +1272,11 @@
     function resumen(idp, idc) {
       var p = buscarId('Propiedades', idp), ct = idc && idc !== '__nuevo' ? contacto(tipo, idc) : null, d = p && buscarId('Propietarios', p.ID_Propietario);
       if (!p && !ct) return '';
-      return '<div class="ficha compacta">' + (ct ? '<p class="item-sub">' + NOMBRE_TIPO[tipo] + ': <strong>' + esc(ct.Nombre) + '</strong>' + (ct.Celular ? ' · ' + esc(ct.Celular) : '') + '</p>' : '') +
+      return '<div class="ficha compacta">' + (ct ? '<p class="item-sub">' + NOMBRE_TIPO[tipo] + ': <strong>' + esc(ct.Nombre) + '</strong>' + (ct.Celular ? ' · ' + esc(ct.Celular) : '') + (tipo === 'interesado' ? ' ' + tagTemp(ct) : '') + '</p>' : '') +
         (p ? '<p class="resaltado">' + esc(resumenProp(p)) + (p.Precio ? ' · ' + dinero(p.Precio) : '') + '</p><p class="item-sub">Propietario: ' + esc(d ? d.Nombre + (d.Celular ? ' · ' + d.Celular : '') : '—') + '</p><p class="item-sub">Dirección: ' + esc(p.Direccion || '—') + '</p>' : '') + '</div>';
     }
     pintar('<div class="pantalla">' + cabVolver(c ? 'Cita' : 'Nueva cita') +
+      (c ? '<a class="btn ancho' + (faltaResultado(c) ? ' primario' : '') + '" href="#/a/como-te-fue/' + esc(c.ID) + '">' + ic('check', 20) + '¿Cómo te fue?</a>' : '') +
       '<form class="formulario" novalidate>' +
       campo({ n: 'TipoCita', l: 'Tipo de cita', t: 'seg', op: TIPOS_CITA, req: true }, tcita) +
       '<p class="item-sub" id="ayudaCita">' + esc(AYUDA_CITA[tcita]) + '</p>' +
@@ -1195,7 +1286,7 @@
       '<div id="resumenCita">' + resumen(v.ID_Propiedad, v.ID_Contacto) + '</div>' +
       '<div class="dos-col">' + campo({ n: 'Fecha', l: 'Fecha', t: 'date', req: true }, v.Fecha) + campo({ n: 'Hora', l: 'Hora', t: 'time' }, v.Hora) + '</div>' +
       campo({ n: 'Notas', l: 'Notas', t: 'area', ph: 'Llevar plano y copia literal' }, v.Notas) +
-      (c ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ESTADOS_CITA, req: true }, v.Estado || 'Pendiente') : '') +
+      (c ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ESTADOS_CITA, req: true }, v.Estado || 'Pendiente') + campo({ n: 'Resultado', l: 'Resultado', t: 'area', ph: 'En qué quedaron' }, v.Resultado) : '') +
       '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar cita</button>' + (c ? '<button class="btn peligro ancho" type="button" data-borrar>Eliminar cita</button>' : '') + '</div></form></div>', function (app) {
         enlazarVolver(app, '#/a/citas');
         var form = app.querySelector('form');
@@ -1249,7 +1340,7 @@
           paso.then(function (nc) {
             var idc = nc ? nc.ID : d.ID_Contacto;
             var reg = { TipoCita: tcita, TipoContacto: NOMBRE_TIPO[tipo], ID_Contacto: idc, ID_Interesado: tipo === 'interesado' ? idc : '', ID_Propiedad: d.ID_Propiedad, Fecha: d.Fecha, Hora: d.Hora, Notas: d.Notas, Estado: c ? (d.Estado || 'Pendiente') : 'Pendiente' };
-            if (c) reg.ID = c.ID;
+            if (c) { reg.ID = c.ID; reg.Resultado = d.Resultado; }
             return guardarRegistro('Citas', reg);
           }).then(function () { toast('Cita guardada'); ir('#/a/citas'); }).catch(function () {});
         };
@@ -1265,6 +1356,105 @@
     var c = buscarId('Citas', p[0]);
     if (!c) return ir('#/a/citas');
     formCita(c, {});
+  };
+
+  /* ---------- ¿Cómo te fue? (cerrar una cita) ---------- */
+
+  // Guarda la cita, el interesado y la llamada de seguimiento en una sola acción del servidor.
+  function cerrarCita(datos) {
+    cargando(true);
+    return api('cerrarCita', datos).then(function (r) {
+      cargando(false);
+      if (!r.ok) { toast(r.error || 'No se pudo guardar.'); throw new Error(r.error); }
+      ponerEnCache('Citas', r.data.cita);
+      if (r.data.interesado) ponerEnCache('Interesados', r.data.interesado);
+      if (r.data.llamada) ponerEnCache('Llamadas', r.data.llamada);
+      return r.data;
+    });
+  }
+
+  VISTAS['como-te-fue'] = function (p) {
+    var c = buscarId('Citas', p[0]);
+    if (!c) return ir('#/a/citas');
+    var cf = conf(), x = partesCita(c), k = x.k, ct = x.ct, tc = tipoDeCita(c);
+    var esInt = k.tipo === 'interesado' && !!ct;
+    var noVino = c.Estado === 'Cancelada' && /^no asistió/i.test(c.Resultado || '');
+    var previo = String(c.Resultado || '').replace(/^no asistió\.?\s*/i, '');
+    var pasos = (ct ? [['llamada', 'Programar llamada']] : []).concat([['cita', 'Agendar otra cita']], esInt ? [['reserva', 'Registrar reserva']] : []);
+    var claseNum = { 1: ' uno', 2: ' dos', 3: '' }[pasos.length];
+    var quien = esInt ? 'el interesado' : 'el contacto';
+    var AYUDA_PASO = {
+      cita: 'Al guardar se abrirá la nueva cita con ' + quien + ' y la propiedad ya elegidos.',
+      reserva: 'Al guardar se abrirá la reserva con el interesado y la propiedad ya elegidos.'
+    };
+    var editables = defsInteresado(cf).filter(function (d) { return d.n !== 'Nombre'; });
+    pintar('<div class="pantalla">' + cabVolver('¿Cómo te fue?') +
+      '<div class="ficha compacta"><p class="item-titulo">' + esc(x.nombre) + x.temp + ' ' + tagCita(c) + '</p><p class="item-sub">' + esc(x.cuando + ' · ' + propDeCita(c)) + '</p></div>' +
+      '<form class="formulario" novalidate>' +
+      campo({ n: 'Que', l: '¿Qué pasó?', t: 'seg', op: QUE_PASO, req: true, clase: 'grande' }, noVino ? 'noAsistio' : 'realizada') +
+      '<div class="recuadro neutro" id="zonaReprog" hidden><span class="recuadro-titulo">Nueva fecha de la cita</span><div class="dos-col">' +
+      campo({ n: 'NFecha', l: 'Fecha', t: 'date', req: true }, '') + campo({ n: 'NHora', l: 'Hora', t: 'time' }, horaDe(c)) + '</div></div>' +
+      campo({ n: 'Resultado', l: '¿En qué quedaron?', t: 'area', ph: 'Le gustó, pero pidió una rebaja. Lo conversa con su familia.' }, previo) +
+      (esInt ? '<div class="grupo">' + campo({ n: 'Temperatura', t: 'temp' }, ct.Temperatura) +
+        campo({ n: 'DetalleInteres', l: 'Describe su interés', t: 'area', ph: 'Quiere separar apenas le aprueben el crédito' }, ct.DetalleInteres) +
+        '<button type="button" class="enlace" data-editar aria-expanded="false" aria-controls="editarInt">' + ic('lapiz', 18) + 'Editar datos del interesado</button>' +
+        '<div class="recuadro neutro" id="editarInt" hidden><span class="recuadro-titulo">Datos de ' + esc(ct.Nombre) + '</span>' +
+        editables.map(function (d) { return campo(d, ct[d.n]); }).join('') + '</div></div>' : '') +
+      '<div class="campo"><span class="etiqueta" id="etPaso">Siguiente paso <span class="opcional">(opcional)</span></span><div class="segmento' + claseNum + '" role="group" aria-labelledby="etPaso">' +
+      pasos.map(function (b) { return '<button type="button" data-paso="' + b[0] + '" aria-pressed="false">' + b[1] + '</button>'; }).join('') + '</div></div>' +
+      '<div class="recuadro neutro" id="zonaLlamada" hidden><span class="recuadro-titulo">Llamada de seguimiento</span>' +
+      campo({ n: 'LFecha', l: 'Fecha de la llamada', t: 'date' }, sumarDias(hoy(), 1)) + campo({ n: 'LMotivo', l: 'Motivo', t: 'area', ph: 'Preguntar si ya decidió' }) + '</div>' +
+      '<p class="item-sub" id="ayudaPaso" hidden></p>' +
+      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar</button></div></form></div>', function (app) {
+        enlazarVolver(app, '#/a/inicio');
+        var form = app.querySelector('form'), siguiente = '', editando = false;
+        var reprog = app.querySelector('#zonaReprog');
+        form.querySelectorAll('[name=Que]').forEach(function (r) {
+          r.onchange = function () {
+            reprog.hidden = r.value !== 'reprogramada';
+            if (!reprog.hidden) form.NFecha.focus();
+          };
+        });
+        var ed = app.querySelector('[data-editar]');
+        if (ed) ed.onclick = function () {
+          editando = !editando;
+          ed.setAttribute('aria-expanded', String(editando));
+          app.querySelector('#editarInt').hidden = !editando;
+        };
+        app.querySelectorAll('[data-paso]').forEach(function (b) {
+          b.onclick = function () {
+            siguiente = siguiente === b.dataset.paso ? '' : b.dataset.paso;
+            app.querySelectorAll('[data-paso]').forEach(function (o) { o.setAttribute('aria-pressed', String(o.dataset.paso === siguiente)); });
+            app.querySelector('#zonaLlamada').hidden = siguiente !== 'llamada';
+            var ayuda = app.querySelector('#ayudaPaso');
+            ayuda.textContent = AYUDA_PASO[siguiente] || '';
+            ayuda.hidden = !AYUDA_PASO[siguiente];
+          };
+        });
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(form);
+          if (!d.Que) return errorForm(form, 'Elige qué pasó con la cita.');
+          if (d.Que === 'reprogramada' && !d.NFecha) return errorForm(form, 'Elige la nueva fecha de la cita.');
+          var datos = { ID: c.ID, Que: d.Que, Resultado: d.Resultado };
+          if (d.Que === 'reprogramada') { datos.Fecha = d.NFecha; datos.Hora = d.NHora; }
+          if (esInt) {
+            datos.Interesado = { Temperatura: d.Temperatura, DetalleInteres: d.DetalleInteres };
+            // Solo se envían los datos del interesado si se abrió "Editar datos del interesado".
+            if (editando) editables.forEach(function (df) { datos.Interesado[df.n] = d[df.n]; });
+          }
+          if (siguiente === 'llamada') datos.Llamada = { Fecha: d.LFecha, Motivo: d.LMotivo };
+          cerrarCita(datos).then(function (g) {
+            toast({ realizada: 'Cita realizada', reprogramada: 'Cita reprogramada para ' + fechaCorta(g.cita.Fecha).toLowerCase(), noAsistio: 'Cita cancelada: no asistió' }[d.Que] + (g.llamada ? ' · llamada programada' : ''));
+            var prp = c.ID_Propiedad ? '&prp=' + encodeURIComponent(c.ID_Propiedad) : '';
+            var destino = siguiente === 'cita' ? '#/a/cita-nueva?tipo=' + CLASE_CITA[tc] + '&ct=' + k.tipo + '&id=' + encodeURIComponent(k.id) + prp
+              : (siguiente === 'reserva' ? '#/a/reserva-nueva?int=' + encodeURIComponent(k.id) + prp : '');
+            if (destino) { history.replaceState(null, '', destino); render(); }
+            else if (history.length > 1) history.back();
+            else ir('#/a/inicio');
+          }).catch(function () {});
+        };
+      });
   };
 
   function formLlamada(l, q) {
@@ -1414,6 +1604,7 @@
           }
           cambio = true;
         }
+        if (!db.ConTemperatura) { Demo.agregarSeguimiento(db, d); cambio = true; }
         if (cambio) Demo.guardar(db);
         return db;
       }
@@ -1471,8 +1662,38 @@
           { ID: 'LLA-0005', TipoContacto: 'Otro', ID_Contacto: 'OTR-0002', ID_Propiedad: '', Motivo: 'Cotizar plano perimétrico', Fecha: d(3), Estado: 'Pendiente', FechaRegistro: d(-1) }
         ]
       };
+      Demo.agregarSeguimiento(db, d);
       Demo.guardar(db);
       return db;
+    },
+    // Temperatura de los interesados y citas pasadas con resultado (o pendientes de cerrar).
+    // También se aplica a los datos demo de versiones anteriores.
+    agregarSeguimiento: function (db, d) {
+      var temps = {
+        'INT-0001': ['Tibio', 'Visitó el terreno de San Jerónimo; le gustó, pero lo ve un poco caro.'],
+        'INT-0002': ['Caliente', 'Separó la casa de San Sebastián; espera la aprobación del crédito.'],
+        'INT-0003': ['Frío', ''],
+        'INT-0004': ['Caliente', 'Reservó el departamento de Santiago. Firma en una semana.']
+      };
+      db.Interesados.forEach(function (i) {
+        if ('Temperatura' in i) return;
+        var t = temps[i.ID] || ['Frío', ''];
+        i.Temperatura = t[0]; i.DetalleInteres = t[1];
+      });
+      var c10 = db.Citas.find(function (c) { return c.ID === 'CIT-0010'; });
+      if (c10 && !c10.Resultado) c10.Resultado = 'Acordó separar la casa con S/ 3 000 mientras le aprueban el crédito.';
+      function existe(tabla, id) { return db[tabla].some(function (x) { return x.ID === id; }); }
+      var nuevas = [
+        { ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0001', Fecha: d(-12), Hora: '11:00', Notas: '', Estado: 'Realizada', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: 'Le gustó el terreno, pero pidió una rebaja. Lo conversa con su familia.' },
+        { ID_Interesado: 'INT-0004', ID_Propiedad: 'PRP-0003', Fecha: d(-5), Hora: '17:00', Notas: '', Estado: 'Realizada', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0004', Resultado: 'Le encantó. Separa mañana con S/ 2 000.' },
+        { ID_Interesado: 'INT-0003', ID_Propiedad: 'PRP-0002', Fecha: d(-3), Hora: '10:00', Notas: '', Estado: 'Cancelada', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0003', Resultado: 'No asistió. No contestó el celular.' },
+        { ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0004', Fecha: d(-1), Hora: '16:00', Notas: 'Mostrar el terreno más grande.', Estado: 'Pendiente', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: '' },
+        { ID_Interesado: '', ID_Propiedad: 'PRP-0006', Fecha: d(-2), Hora: '11:30', Notas: 'Revisar documentos de la casa.', Estado: 'Pendiente', TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0002', Resultado: '' }
+      ];
+      nuevas.forEach(function (c) {
+        if (existe('Propiedades', c.ID_Propiedad) && existe(c.TipoContacto === 'Interesado' ? 'Interesados' : 'Propietarios', c.ID_Contacto)) Demo.insertar(db, 'Citas', c);
+      });
+      db.ConTemperatura = true;
     },
     guardar: function (db) { guardarLocal('inmo_demo_db', JSON.stringify(db)); },
     prefijos: { Propietarios: 'PRO', Interesados: 'INT', OtrosContactos: 'OTR', Propiedades: 'PRP', Citas: 'CIT', Llamadas: 'LLA', Reservas: 'RES' },
@@ -1536,6 +1757,41 @@
       if (estado === 'Cancelada' && antes !== 'Cancelada') propiedad = Demo.liberar(db, prop.ID);
       return { ok: true, data: { reserva: reserva, propiedad: propiedad && Object.assign({}, propiedad) } };
     },
+    // Igual que revisarTemperatura() en Code.gs. Devuelve el error, si lo hay.
+    revisarTemperatura: function (reg, nuevo) {
+      var t = String(reg.Temperatura == null ? '' : reg.Temperatura).trim();
+      if (t && TEMPERATURAS.indexOf(t) < 0) return 'Elige un nivel de interés válido: Frío, Tibio o Caliente.';
+      if (nuevo && !t) reg.Temperatura = 'Frío';
+      return '';
+    },
+    // Las mismas reglas que cerrarCita() en Code.gs.
+    cerrarCita: function (db, d) {
+      function error(t) { return { ok: false, error: t }; }
+      var estado = { realizada: 'Realizada', reprogramada: 'Pendiente', noAsistio: 'Cancelada' }[d.Que];
+      if (!estado) return error('Elige qué pasó con la cita.');
+      var fecha = String(d.Fecha || '').trim();
+      if (d.Que === 'reprogramada' && !esIso(fecha)) return error('Elige la nueva fecha de la cita.');
+      var cita = db.Citas.find(function (c) { return c.ID === d.ID; });
+      if (!cita) return error('Esta cita ya no existe.');
+      var k = contactoDeCita(cita);
+      var interesado = null;
+      if (d.Interesado && k.tipo === 'interesado' && k.id) {
+        if (!db.Interesados.some(function (i) { return i.ID === k.id; })) return error('El interesado de esta cita ya no existe.');
+        interesado = { ID: k.id };
+        ['Temperatura', 'DetalleInteres', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (c) {
+          if (c in d.Interesado) interesado[c] = String(d.Interesado[c] == null ? '' : d.Interesado[c]).trim();
+        });
+        var et = Demo.revisarTemperatura(interesado, false);
+        if (et) return error(et);
+      }
+      if (d.Llamada && !k.id) return error('Esta cita no tiene un contacto al que llamar.');
+      var regCita = { ID: cita.ID, Estado: estado, Resultado: d.Que === 'noAsistio' ? textoNoAsistio(d.Resultado) : String(d.Resultado || '').trim() };
+      if (d.Que === 'reprogramada') { regCita.Fecha = fecha; regCita.Hora = d.Hora || ''; }
+      var out = { cita: Object.assign({}, Demo.insertar(db, 'Citas', regCita)), interesado: null, llamada: null };
+      if (interesado) out.interesado = Object.assign({}, Demo.insertar(db, 'Interesados', interesado));
+      if (d.Llamada) out.llamada = Object.assign({}, Demo.insertar(db, 'Llamadas', { TipoContacto: NOMBRE_TIPO[k.tipo], ID_Contacto: k.id, ID_Propiedad: cita.ID_Propiedad, Motivo: String(d.Llamada.Motivo || '').trim(), Fecha: d.Llamada.Fecha || '', Estado: 'Pendiente' }));
+      return { ok: true, data: out };
+    },
     // Igual que datosPublicos() en Code.gs: de la reserva solo sale la fecha límite vigente.
     publico: function (db) {
       var limites = {};
@@ -1557,7 +1813,7 @@
       }
       if (a === 'registrarInteres') {
         var r = {}; ['Nombre', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (k) { r[k] = d[k] || ''; });
-        r.Origen = 'App'; Demo.insertar(db, 'Interesados', r); return { ok: true };
+        r.Origen = 'App'; r.Temperatura = 'Frío'; r.DetalleInteres = ''; Demo.insertar(db, 'Interesados', r); return { ok: true };
       }
       if (a === 'login') return d.password === Demo.CONTRASENA ? Demo.sesion(db) : { ok: false, error: 'Contraseña incorrecta. En el modo demo es demo1234.' };
       if (a === 'logout') { delete db.Sesiones[req.token]; Demo.guardar(db); return { ok: true }; }
@@ -1577,9 +1833,11 @@
         if (!Demo.prefijos[d.tabla]) return { ok: false, error: 'Tabla no válida.' };
         if (d.tabla === 'Reservas') return { ok: false, error: 'Las reservas se guardan con su propio formulario.' };
         if (d.tabla === 'Propiedades' && reg.ID && ('Estado' in reg) && reg.Estado !== 'Reservado' && Demo.reservaActiva(db, reg.ID)) return { ok: false, error: MSJ_ACTIVA };
+        if (d.tabla === 'Interesados') { var et = Demo.revisarTemperatura(reg, !reg.ID); if (et) return { ok: false, error: et }; }
         return { ok: true, data: Object.assign({}, Demo.insertar(db, d.tabla, reg)) };
       }
       if (a === 'guardarReserva') return Demo.guardarReserva(db, d.registro);
+      if (a === 'cerrarCita') return Demo.cerrarCita(db, d);
       if (a === 'eliminar') {
         if (!Demo.prefijos[d.tabla]) return { ok: false, error: 'Tabla no válida.' };
         if (d.tabla === 'Propiedades' && Demo.reservaActiva(db, d.id)) return { ok: false, error: 'Esta propiedad tiene una reserva activa. Cancélala antes de eliminar la propiedad.' };
@@ -1598,6 +1856,6 @@
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(function () {});
   }
-  if (typeof module !== 'undefined') module.exports = { coincidencia: coincidencia, recomendarPara: recomendarPara, Demo: Demo, etiquetaReservado: etiquetaReservado, contactoDeCita: contactoDeCita };
+  if (typeof module !== 'undefined') module.exports = { coincidencia: coincidencia, recomendarPara: recomendarPara, interesadosPara: interesadosPara, Demo: Demo, etiquetaReservado: etiquetaReservado, contactoDeCita: contactoDeCita, temperatura: temperatura, yaPaso: yaPaso, faltaResultado: faltaResultado, textoNoAsistio: textoNoAsistio };
   else render();
 })();

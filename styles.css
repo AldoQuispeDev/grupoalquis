@@ -127,6 +127,22 @@ button.item { width: 100%; border: 0; border-bottom: 1px solid var(--linea); bac
 .sello::before { content: ''; width: 6px; height: 6px; border-radius: 3px; background: currentColor; flex-shrink: 0; }
 .estado.Vendido, .estado.Alquilado, .estado.Cancelada { color: var(--texto-2); }
 
+/* Temperatura del interesado: frío (azul), tibio (ámbar) y caliente (rojo), siempre en tonos suaves. */
+.tag-temp { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; line-height: 1.5; padding: 1px 8px 1px 7px; border-radius: 999px; vertical-align: 1px; white-space: nowrap; }
+.tag-temp::before { content: ''; width: 6px; height: 6px; border-radius: 3px; background: currentColor; flex-shrink: 0; }
+.tag-temp.frio { background: var(--acento-suave); color: var(--acento); }
+.tag-temp.tibio { background: var(--aviso-suave); color: var(--aviso); }
+.tag-temp.caliente { background: var(--rojo-suave); color: var(--rojo); }
+.punto { display: inline-block; width: 8px; height: 8px; border-radius: 4px; background: currentColor; margin-right: 7px; vertical-align: 1px; }
+.punto.frio { color: var(--acento); }
+.punto.tibio { color: var(--aviso); }
+.punto.caliente { color: var(--rojo); }
+.chip.activo .punto { color: #fff; }
+.falta-resultado { color: var(--aviso); font-weight: 600; }
+.resultado { margin-top: 6px; padding: 8px 12px; border-radius: var(--radio-chico); background: var(--neutro-suave); font-size: 14px; color: var(--texto); white-space: pre-line; overflow-wrap: anywhere; }
+.item.arriba { align-items: flex-start; }
+.pildora { flex-shrink: 0; color: var(--acento); border-color: var(--acento); }
+
 /* Avatares e íconos de tipo */
 .avatar { width: 44px; height: 44px; border-radius: 22px; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 600; flex-shrink: 0; }
 .avatar.propietario { background: var(--acento-suave); color: var(--acento); }
@@ -209,13 +225,27 @@ form.formulario { display: flex; flex-direction: column; gap: 18px; }
 .multi input:focus-visible + span { outline: 3px solid var(--foco); outline-offset: 2px; }
 .segmento { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .segmento.dos { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.segmento.uno { grid-template-columns: minmax(0, 1fr); }
 .segmento label { position: relative; }
 .segmento input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .segmento span { display: flex; align-items: center; justify-content: center; min-height: 48px; border-radius: var(--radio-chico); border: 1px solid var(--borde-campo); background: var(--tarjeta); font-size: 14px; font-weight: 500; color: var(--texto); cursor: pointer; text-align: center; padding: 0 6px; }
 .segmento input:checked + span { border-color: var(--acento); box-shadow: inset 0 0 0 1px var(--acento); background: var(--acento-suave); color: var(--acento); font-weight: 600; }
 .segmento input:focus-visible + span { outline: 3px solid var(--foco); outline-offset: 2px; }
+.segmento.grande span { min-height: 56px; font-size: 15px; }
+.segmento button { min-height: 52px; border-radius: var(--radio-chico); border: 1px solid var(--borde-campo); background: var(--tarjeta); font-size: 14px; font-weight: 500; color: var(--texto); cursor: pointer; padding: 4px 6px; line-height: 1.25; }
+.segmento button[aria-pressed="true"] { border-color: var(--acento); box-shadow: inset 0 0 0 1px var(--acento); background: var(--acento-suave); color: var(--acento); font-weight: 600; }
+.segmento.temp span { flex-direction: column; gap: 3px; min-height: 84px; padding: 8px 6px; line-height: 1.25; }
+.segmento.temp strong { font-size: 15px; font-weight: 600; }
+.segmento.temp small { font-size: 11.5px; font-weight: 400; color: var(--texto-2); }
+.segmento.temp input:checked + span small { color: inherit; }
+.segmento.temp .frio input:checked + span { border-color: var(--acento); box-shadow: inset 0 0 0 1px var(--acento); background: var(--acento-suave); color: var(--acento); }
+.segmento.temp .tibio input:checked + span { border-color: var(--aviso); box-shadow: inset 0 0 0 1px var(--aviso); background: var(--aviso-suave); color: var(--aviso); }
+.segmento.temp .caliente input:checked + span { border-color: var(--rojo); box-shadow: inset 0 0 0 1px var(--rojo); background: var(--rojo-suave); color: var(--rojo); }
+.enlace { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0; border: 0; background: none; color: var(--acento); font-size: 15px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .recuadro { background: var(--tarjeta); border: 1px solid var(--borde); border-left: 3px solid var(--aviso); border-radius: var(--radio); padding: 16px; display: flex; flex-direction: column; gap: 14px; }
 .recuadro-titulo { font-size: 13px; font-weight: 600; color: var(--aviso); }
+.recuadro.neutro { border-left-color: var(--acento); }
+.recuadro.neutro .recuadro-titulo { color: var(--acento); }
 .error { font-size: 14px; color: var(--rojo); font-weight: 600; background: var(--rojo-suave); border-radius: var(--radio-chico); padding: 10px 14px; }
 .trampa { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
 .acciones-form { display: flex; flex-direction: column; gap: 10px; }

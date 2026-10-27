@@ -35,6 +35,22 @@ En la pestaña Config: `FACEBOOK`, `TIKTOK` e `INSTAGRAM`. Deben empezar con `ht
 - En la pestaña Citas, las columnas `TipoCita`, `TipoContacto` e `ID_Contacto` están al final. Las citas antiguas (solo con `ID_Interesado`) se muestran como Visita con un interesado.
 - En el detalle de un propietario está el botón "Agendar cita de captación".
 
+## Temperatura del interesado
+- Tres niveles: **Frío** (aún no conoce la propiedad), **Tibio** (ya la conoce y está algo interesado) y **Caliente** (tiene interés real en comprar).
+- Se elige con tres botones en el formulario del interesado, justo después del nombre y el celular, junto con "Describe su interés". Al registrar viene marcado Frío.
+- El formulario público "Cuéntanos qué buscas" no la muestra: esos interesados se guardan como Frío. Los interesados antiguos sin valor también cuentan como Frío.
+- Aparece como etiqueta de color en Contactos (con filtro rápido Todos, Caliente, Tibio y Frío), en el detalle del interesado, en las citas y en "Interesados que coinciden", que se ordena primero por temperatura y después por porcentaje.
+- En la pestaña Interesados, las columnas `Temperatura` y `DetalleInteres` están al final. Si escribes a mano en la hoja, usa exactamente Frío, Tibio o Caliente.
+
+## ¿Cómo te fue? (cerrar una cita)
+- Se abre desde el detalle de la cita, desde Inicio (sección "¿Cómo te fue?", con las citas que ya pasaron y siguen pendientes) o desde la agenda, donde las citas pasadas sin resultado dicen "Falta resultado".
+- **Se realizó** → Realizada. **Se reprogramó** → eliges la nueva fecha y hora y queda Pendiente. **No asistió** → Cancelada, y el resultado empieza con "No asistió".
+- "¿En qué quedaron?" se guarda en la columna `Resultado` de la pestaña Citas (al final).
+- Si la cita es con un interesado, también actualizas su temperatura, "Describe su interés" y, con "Editar datos del interesado", lo que busca.
+- Siguiente paso opcional: programar una llamada, agendar otra cita o registrar una reserva (estas dos se abren al guardar, con el contacto y la propiedad ya elegidos).
+- Un solo botón Guardar: el servidor actualiza la cita, el interesado y la llamada en un solo paso, sin dejar nada a medias.
+- En el detalle de cada interesado, "Historial" muestra sus citas de la más reciente a la más antigua, con su resultado.
+
 ## Reservas
 - Pestaña `Reservas` (ID con prefijo `RES`). Estados: Activa, Concretada y Cancelada. Obligatorios: propiedad e interesado.
 - El servidor cambia el estado de la propiedad automáticamente: reserva Activa → "Reservado"; Concretada → "Vendido" (o "Alquilado" si es alquiler); Cancelada → "Disponible", si no tiene otra reserva activa.
@@ -50,4 +66,4 @@ En la pestaña Config: `FACEBOOK`, `TIKTOK` e `INSTAGRAM`. Deben empezar con `ht
 ## Actualizaciones
 - Si cambias Code.gs: pega el archivo nuevo, guarda y ejecuta `configurar`. Puedes ejecutarla las veces que quieras: solo agrega al final las pestañas y columnas que falten, sin borrar, mover ni cambiar tus datos. Luego ve a Implementar > Administrar implementaciones > lápiz (Editar) > Versión: Nueva versión > Implementar. La URL /exec no cambia.
 - No cambies el nombre de los encabezados de las columnas: el servidor ubica cada dato por el nombre de su columna. Sí puedes agregar columnas propias al final.
-- Si cambias la app: sube la versión en `sw.js` (`inmo-v3`, `inmo-v4`…) para que los celulares descarguen los archivos nuevos.
+- Si cambias la app: sube la versión en `sw.js` (`inmo-v4`, `inmo-v5`…) para que los celulares descarguen los archivos nuevos.
