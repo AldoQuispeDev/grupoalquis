@@ -23,10 +23,13 @@
   var NOMBRE_TIPO = { propietario: 'Propietario', interesado: 'Interesado', otro: 'Otro' };
   var MARCA = 'Grupo Alquis Perú';
   var MIN_CONTRASENA = 8;
+  var ROL_ADMIN = 'Administrador';
   var REDES = [['facebook', 'Facebook'], ['tiktok', 'TikTok'], ['instagram', 'Instagram']];
 
   var S = {
     token: leerLocal('inmo_token') || '',
+    agente: leerJSON('inmo_agente'),
+    filtroAgente: '',
     db: leerJSON('inmo_cache'),
     pub: null,
     cargandoDb: false,
@@ -238,6 +241,7 @@
     });
     return pedido.then(function (r) {
       if (r && r.auth === false && S.token) sesionVencida();
+      if (r && r.cambiar && S.agente) { S.agente.debeCambiar = true; recordarAgente(S.agente); ir('#/a/cambiar-contrasena'); }
       return r;
     });
   }
@@ -251,6 +255,7 @@
       if (r.ok) {
         S.db = r.data; S.db._t = Date.now();
         guardarLocal('inmo_cache', JSON.stringify(S.db));
+        if (r.data.yo) recordarAgente(r.data.yo);
         render();
       } else if (r.auth !== false && !S.db) {
         toast(r.error || 'No se pudieron cargar los datos.');
@@ -265,10 +270,15 @@
     guardarLocal('inmo_cache', JSON.stringify(S.db));
   }
 
-  function guardarRegistro(tabla, registro) {
+  // Si el celular ya lo tiene otro agente, el servidor avisa sin dar detalles y se puede guardar igual.
+  function guardarRegistro(tabla, registro, confirmarDuplicado) {
     cargando(true);
-    return api('guardar', { tabla: tabla, registro: registro }).then(function (r) {
+    return api('guardar', { tabla: tabla, registro: registro, confirmarDuplicado: !!confirmarDuplicado }).then(function (r) {
       cargando(false);
+      if (!r.ok && r.duplicado) {
+        if (confirm(r.error + '\n\n¿Guardar de todas formas?')) return guardarRegistro(tabla, registro, true);
+        throw new Error(r.error);
+      }
       if (!r.ok) { toast(r.error || 'No se pudo guardar.'); throw new Error(r.error); }
       ponerEnCache(tabla, r.data);
       return r.data;
@@ -300,8 +310,12 @@
   }
 
   function olvidarSesion() {
-    S.token = ''; S.db = null;
-    guardarLocal('inmo_token', null); guardarLocal('inmo_cache', null);
+    S.token = ''; S.db = null; S.agente = null; S.filtroAgente = '';
+    guardarLocal('inmo_token', null); guardarLocal('inmo_cache', null); guardarLocal('inmo_agente', null);
+  }
+  function recordarAgente(a) {
+    S.agente = { ID: a.ID, Usuario: a.Usuario, Nombre: a.Nombre, Rol: a.Rol, debeCambiar: !!a.debeCambiar };
+    guardarLocal('inmo_agente', JSON.stringify(S.agente));
   }
   function salirAgente() {
     if (S.token) api('logout');
@@ -317,6 +331,32 @@
   /* ================= Acceso a datos ================= */
 
   function T(n) { return (S.db && S.db[n]) || []; }
+  function esAdmin() { return !!S.agente && S.agente.Rol === ROL_ADMIN; }
+  function agenteActivo(a) { return String(a.Activo).trim().toLowerCase() !== 'no'; }
+  function agentesActivos() { return T('Agentes').filter(agenteActivo); }
+  function nombreAgente(id) { var a = id && buscarId('Agentes', id); return a ? a.Nombre : (id ? 'Agente eliminado' : 'Sin asignar'); }
+  // Etiqueta pequeña con el agente del registro. Solo la ve el administrador.
+  function tagAgente(reg) {
+    if (!esAdmin() || !reg) return '';
+    return ' <span class="tag-agente' + (reg.ID_Agente ? '' : ' libre') + '">' + esc(nombreAgente(reg.ID_Agente).split(' ')[0]) + '</span>';
+  }
+  // Filtro "Agente: Todos / nombre" de las listas del administrador.
+  function delAgente(arr) {
+    var f = S.filtroAgente;
+    if (!esAdmin() || !f) return arr;
+    return arr.filter(function (x) { return f === '~' ? !x.ID_Agente : x.ID_Agente === f; });
+  }
+  function filtroAgente() {
+    if (!esAdmin()) return '';
+    var op = [['', 'Todos']].concat(T('Agentes').map(function (a) { return [a.ID, a.Nombre + (agenteActivo(a) ? '' : ' (inactivo)')]; }), [['~', 'Sin asignar']]);
+    return '<label class="filtro-agente">Agente: <select data-filtro-agente aria-label="Filtrar por agente">' + op.map(function (o) {
+      return '<option value="' + esc(o[0]) + '"' + (o[0] === S.filtroAgente ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+    }).join('') + '</select></label>';
+  }
+  function enlazarFiltroAgente(app, rehacer) {
+    var sel = app.querySelector('[data-filtro-agente]');
+    if (sel) sel.onchange = function () { S.filtroAgente = sel.value; rehacer(); };
+  }
   function buscarId(tabla, id) { return T(tabla).find(function (x) { return x.ID === id; }); }
   function conf() { return (S.db && S.db.config) || (S.pub && S.pub.config) || { zonas: [], caracteristicas: [], categoriasOtros: [] }; }
   function contacto(tipo, id) { return buscarId(TABLA_DE[tipo] || '', id); }
@@ -395,11 +435,18 @@
   }
 
   var VISTAS = {};
+  var SOLO_ADMIN = ['agentes', 'agente', 'agente-form', 'asignar'];
   function render() {
     var r = ruta();
     var p = r.partes;
     if (p[0] === 'a') {
       if (!S.token) return ir('#/agente');
+      // Con contraseña temporal no se puede usar ninguna otra pantalla.
+      if (S.agente && S.agente.debeCambiar) {
+        if (p[1] !== 'cambiar-contrasena') return ir('#/a/cambiar-contrasena');
+        return VISTAS['cambiar-contrasena']();
+      }
+      if (SOLO_ADMIN.indexOf(p[1]) >= 0 && !esAdmin()) return ir('#/a/inicio');
       if (!S.db) { pintar('<div class="pantalla"><div class="vacio">Cargando tus datos…</div></div>'); cargarDb(true); return; }
       cargarDb(false);
       var v = VISTAS[p[1]] || VISTAS.inicio;
@@ -554,7 +601,7 @@
     });
   }
   function avisoDemo() {
-    return DEMO ? '<div class="aviso-demo">Modo demo: los datos son de ejemplo y se guardan solo en este celular. Contraseña del agente: demo1234.</div>' : '';
+    return DEMO ? '<div class="aviso-demo">Modo demo: los datos son de ejemplo y se guardan solo en este celular. Usuarios: aldo (administrador), maria y jose; contraseña: demo1234.</div>' : '';
   }
   function htmlRedes(c) {
     var nombre = marca(c);
@@ -627,7 +674,8 @@
       var msg = reservada
         ? 'Hola, vi que la propiedad ' + prop.ID + ' (' + prop.Tipo + (prop.Zona ? ' en ' + prop.Zona : '') + ') está reservada. ¿Me avisan si se libera?'
         : 'Hola, me interesa la propiedad ' + prop.ID + ': ' + prop.Tipo + (prop.Zona ? ' en ' + prop.Zona : '') + (prop.Precio ? ' (' + dinero(prop.Precio) + ')' : '') + '. ¿Me das más información?';
-      var wsp = wspLink(c.whatsapp, msg);
+      // Escribe al agente de la propiedad; si no tiene celular, al WhatsApp general.
+      var wsp = wspLink(prop.WhatsApp || c.whatsapp, msg);
       pintar('<div class="pantalla publica">' + cabVolver(prop.Tipo + (prop.Operacion ? ' en ' + prop.Operacion.toLowerCase() : '')) +
         '<div class="ficha"><div class="ficha-top">' + icTipo(prop.Tipo) + '<div><h2>' + esc(prop.Zona || 'Zona por confirmar') + '</h2><span class="precio">' + (dinero(prop.Precio) || 'Precio a consultar') + '</span></div></div>' +
         (reservada ? '<span class="sello">' + esc(etiquetaReservado(prop)) + '</span>' : '') +
@@ -710,27 +758,31 @@
 
   function vLogin() {
     pintar('<div class="pantalla publica">' + cabVolver('Acceso del agente') + avisoDemo() +
-      '<p class="intro">Ingresa tu contraseña para ver tus contactos, propiedades y citas.</p>' +
-      '<form class="formulario" novalidate>' + campoClave('password', 'Contraseña', 'current-password') +
+      '<p class="intro">Ingresa con tu usuario y tu contraseña para ver tus contactos, propiedades y citas.</p>' +
+      '<form class="formulario" novalidate><div class="campo"><label for="f_usuario">Usuario</label><input id="f_usuario" name="usuario" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="30" value="' + esc(leerLocal('inmo_usuario') || '') + '"></div>' +
+      campoClave('password', 'Contraseña', 'current-password') +
       '<div class="acciones-form"><button class="btn primario ancho" type="submit">Entrar</button></div></form></div>',
       function (app) {
         enlazarVolver(app, '#/');
         enlazarVerClave(app);
         var form = app.querySelector('form');
-        var inp = app.querySelector('#f_password');
-        inp.focus();
+        var usu = app.querySelector('#f_usuario'), inp = app.querySelector('#f_password');
+        (usu.value ? inp : usu).focus();
         form.onsubmit = function (e) {
           e.preventDefault();
-          var clave = inp.value;
+          var usuario = usu.value.trim().toLowerCase(), clave = inp.value;
+          if (!usuario) return errorForm(form, 'Escribe tu usuario.');
           if (!clave) return errorForm(form, 'Escribe tu contraseña.');
           cargando(true);
-          api('login', { password: clave }).then(function (r) {
+          api('login', { usuario: usuario, password: clave }).then(function (r) {
             cargando(false);
             if (!r.ok || !r.data || !r.data.token) { inp.value = ''; inp.focus(); return errorForm(form, r.error || 'No se pudo iniciar sesión.'); }
             S.token = r.data.token;
             guardarLocal('inmo_token', S.token);
+            guardarLocal('inmo_usuario', usuario);
+            recordarAgente(r.data.agente);
             S.db = null;
-            ir('#/a/inicio');
+            ir(S.agente.debeCambiar ? '#/a/cambiar-contrasena' : '#/a/inicio');
           });
         };
       });
@@ -766,7 +818,7 @@
     if (tc === 'Reunión' && modo !== 'contacto') sub = NOMBRE_TIPO[k.tipo] + (k.tipo === 'otro' && ct && ct.Categoria ? ' (' + ct.Categoria + ')' : '') + ' · ' + sub;
     if (modo === 'fecha') sub = x.cuando + ' · ' + sub;
     return '<div class="item"><a href="#/a/cita/' + esc(c.ID) + '" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;text-decoration:none;color:inherit">' +
-      (modo ? '' : '<span class="hora">' + esc(c.Hora || '—') + '</span>') + '<div class="item-cuerpo"><div class="item-titulo">' + (modo === 'contacto' ? esc(x.cuando) : esc(x.nombre) + x.temp) + ' ' + tagCita(c) +
+      (modo ? '' : '<span class="hora">' + esc(c.Hora || '—') + '</span>') + '<div class="item-cuerpo"><div class="item-titulo">' + (modo === 'contacto' ? esc(x.cuando) : esc(x.nombre) + x.temp) + ' ' + tagCita(c) + tagAgente(c) +
       (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado chico ' + esc(c.Estado) + '">' + esc(c.Estado) + '</span>' : '') + '</div><div class="item-sub">' + (faltaResultado(c) ? MARCA_FALTA + ' · ' : '') + esc(sub) + '</div></div></a>' +
       (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar a ' + esc(ct.Nombre) + '">' + ic('tel', 20) + '</a>' : '') + '</div>';
   }
@@ -774,7 +826,7 @@
   // Inicio > ¿Cómo te fue?: toda la fila abre la pantalla para cerrar la cita.
   function itemPorCerrar(c) {
     var x = partesCita(c);
-    return '<a class="item" href="#/a/como-te-fue/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(x.nombre) + x.temp + ' ' + tagCita(c) + '</div>' +
+    return '<a class="item" href="#/a/como-te-fue/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(x.nombre) + x.temp + ' ' + tagCita(c) + tagAgente(c) + '</div>' +
       '<div class="item-sub">' + esc(x.cuando + ' · ' + propDeCita(c)) + '</div></div><span class="btn chico pildora">¿Cómo te fue?</span></a>';
   }
 
@@ -797,7 +849,7 @@
     if (modo !== 'inicio' && esIso(r.FechaReserva)) sub.push('Reservó ' + fechaCorta(r.FechaReserva).toLowerCase());
     var limite = activa ? textoLimite(r.FechaLimite) : '';
     var href = modo === 'propiedad' ? '#/a/reserva/' + r.ID : '#/a/propiedad/' + r.ID_Propiedad;
-    return '<a class="item" href="' + esc(href) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(titulo) +
+    return '<a class="item" href="' + esc(href) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(titulo) + (modo === 'inicio' ? tagAgente(r) : '') +
       (modo === 'inicio' ? '' : ' <span class="estado chico ' + esc(r.Estado) + '">' + esc(r.Estado || '') + '</span>') + '</div>' +
       '<div class="item-sub">' + esc(sub.join(' · ')) + (limite ? (sub.length ? ' · ' : '') + '<span' + (vencida ? ' class="alerta-texto"' : '') + '>' + esc(limite) + '</span>' : '') + '</div></div></a>';
   }
@@ -809,7 +861,7 @@
     var tel = ct && telLink(ct.Celular);
     var cuando = l.Fecha && l.Fecha !== hoy() ? fechaCorta(l.Fecha) + ' · ' : '';
     return '<div class="item' + (hecha ? ' tachado' : '') + '"><button class="check' + (hecha ? ' hecho' : '') + '" data-hecha="' + esc(l.ID) + '" aria-label="' + (hecha ? 'Marcar como pendiente' : 'Marcar como hecha') + '"><span>' + (hecha ? ic('check', 16) : '') + '</span></button>' +
-      '<a href="#/a/llamada/' + esc(l.ID) + '" class="item-cuerpo" style="text-decoration:none;color:inherit"><div class="item-titulo">' + esc(ct ? ct.Nombre : 'Contacto eliminado') + ' <span class="tag ' + tipo + '">' + esc(etiqueta) + '</span></div>' +
+      '<a href="#/a/llamada/' + esc(l.ID) + '" class="item-cuerpo" style="text-decoration:none;color:inherit"><div class="item-titulo">' + esc(ct ? ct.Nombre : 'Contacto eliminado') + ' <span class="tag ' + tipo + '">' + esc(etiqueta) + '</span>' + tagAgente(l) + '</div>' +
       '<div class="item-sub">' + esc(cuando + (l.Motivo || 'Sin motivo')) + '</div></a>' +
       (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar">' + ic('tel', 20) + '</a>' : '') + '</div>';
   }
@@ -824,38 +876,53 @@
     });
   }
 
+  // Inicio > Sin asignar (solo administrador): lo que llegó desde la app pública.
+  function itemSinAsignar(tipo, c) {
+    var extra = tipo === 'propietario'
+      ? T('Propiedades').filter(function (p) { return p.ID_Propietario === c.ID && !p.ID_Agente; }).map(resumenProp).join(' · ') || 'Sin propiedades'
+      : 'Busca: ' + ([c.Tipo, lista(c.Zonas).join(', ')].filter(Boolean).join(' · ') || 'sin detalles');
+    return '<div class="item"><a href="#/a/contacto/' + tipo + '/' + esc(c.ID) + '" class="item-cuerpo" style="text-decoration:none;color:inherit"><div class="item-titulo">' + esc(c.Nombre) +
+      ' <span class="tag ' + tipo + '">' + NOMBRE_TIPO[tipo] + '</span></div><div class="item-sub">' + esc((c.Celular ? c.Celular + ' · ' : '') + extra) + '</div></a>' +
+      '<a class="btn chico pildora" href="#/a/asignar/' + TABLA_DE[tipo] + '/' + esc(c.ID) + '">Asignar a…</a></div>';
+  }
+
   VISTAS.inicio = function () {
-    var h = hoy();
+    var h = hoy(), admin = esAdmin();
     var citasHoy = citasActivas().filter(function (c) { return c.Fecha === h; }).sort(ordenarCitas);
     var pend = llamadasPendientes().filter(function (l) { return !l.Fecha || l.Fecha <= h; }).sort(function (a, b) { return (a.Fecha || '').localeCompare(b.Fecha || ''); });
-    var porAprobar = T('Propiedades').filter(function (p) { return p.Estado === 'Pendiente'; });
+    var porAprobar = T('Propiedades').filter(function (p) { return p.Estado === 'Pendiente' && p.ID_Agente; });
     var en3 = sumarDias(h, 3);
     var porVencer = T('Reservas').filter(function (r) { return r.Estado === 'Activa' && esIso(r.FechaLimite) && r.FechaLimite <= en3; })
       .sort(function (a, b) { return a.FechaLimite.localeCompare(b.FechaLimite); });
     var cerrar = T('Citas').filter(porCerrar).sort(ordenarCitas).reverse();
     var cerrarVer = S.verPorCerrar ? cerrar : cerrar.slice(0, 5);
     var hace7 = sumarDias(h, -7);
-    var nuevosInt = T('Interesados').filter(function (i) { return i.Origen === 'App' && String(i.FechaRegistro).slice(0, 10) >= hace7; });
+    var nuevosInt = T('Interesados').filter(function (i) { return i.Origen === 'App' && i.ID_Agente && String(i.FechaRegistro).slice(0, 10) >= hace7; });
+    var sinAsignar = !admin ? [] : T('Propietarios').filter(function (c) { return !c.ID_Agente; }).map(function (c) { return itemSinAsignar('propietario', c); })
+      .concat(T('Interesados').filter(function (c) { return !c.ID_Agente; }).map(function (c) { return itemSinAsignar('interesado', c); }));
     var nuevos = porAprobar.map(function (p) {
       var dueno = buscarId('Propietarios', p.ID_Propietario);
       return '<a class="item" href="#/a/propiedad/' + esc(p.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(resumenProp(p)) + ' <span class="tag app">Por aprobar</span></div><div class="item-sub">Enviada por ' + esc(dueno ? dueno.Nombre : 'propietario') + '</div></div></a>';
     }).concat(nuevosInt.map(function (i) {
       return '<a class="item" href="#/a/contacto/interesado/' + esc(i.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(i.Nombre) + ' <span class="tag interesado">Nuevo interesado</span></div><div class="item-sub">Busca: ' + esc([i.Tipo, lista(i.Zonas).join(', ')].filter(Boolean).join(' · ') || 'sin detalles') + '</div></div></a>';
     }));
-    pintar('<div class="pantalla"><div class="cab"><div><p class="fecha-hoy">' + fechaLarga(h) + '</p><p class="saludo">' + saludo() + '</p></div>' +
+    pintar('<div class="pantalla"><div class="cab"><div><p class="fecha-hoy">' + fechaLarga(h) + '</p><p class="saludo">' + saludo() + (S.agente && S.agente.Nombre ? ', ' + esc(S.agente.Nombre.split(' ')[0]) : '') + '</p></div>' +
       '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a></div>' + avisoDemo() +
       '<div class="metricas"><a class="metrica" href="#/a/citas"><span>Citas hoy</span><strong>' + citasHoy.length + '</strong></a>' +
       '<a class="metrica naranja" href="#/a/llamadas"><span>Llamadas pendientes</span><strong>' + pend.length + '</strong></a></div>' +
       (cerrar.length ? '<div class="seccion"><div class="seccion-cab"><h2>¿Cómo te fue?</h2>' +
         (cerrar.length > 5 ? '<button class="ver-todo" data-ver-cerrar>' + (S.verPorCerrar ? 'Ver menos' : 'Ver todas (' + cerrar.length + ')') + '</button>' : '') + '</div>' +
         '<p class="item-sub">Citas que ya pasaron y siguen pendientes. Anota cómo te fue.</p><div class="lista">' + cerrarVer.map(itemPorCerrar).join('') + '</div></div>' : '') +
+      (sinAsignar.length ? '<div class="seccion"><div class="seccion-cab"><h2>Sin asignar</h2></div><p class="item-sub">Llegaron desde la app pública. Elige qué agente los atiende; los agentes no los ven hasta que los asignes.</p>' +
+        '<div class="lista">' + sinAsignar.join('') + '</div></div>' : '') +
       (nuevos.length ? '<div class="seccion"><div class="seccion-cab"><h2>Nuevos desde la app</h2></div><div class="lista">' + nuevos.join('') + '</div></div>' : '') +
       '<div class="seccion"><div class="seccion-cab"><h2>Citas de hoy</h2><a class="ver-todo" href="#/a/citas">Ver todo</a></div>' +
       (citasHoy.length ? '<div class="lista">' + citasHoy.map(function (c) { return itemCita(c); }).join('') + '</div>' : '<div class="vacio">No tienes citas hoy. <a href="#/a/cita-nueva">Agendar una cita</a></div>') + '</div>' +
       (porVencer.length ? '<div class="seccion"><div class="seccion-cab"><h2>Reservas por vencer</h2></div><div class="lista">' + porVencer.map(function (r) { return itemReserva(r, 'inicio'); }).join('') + '</div></div>' : '') +
       '<div class="seccion"><div class="seccion-cab"><h2>Llamadas pendientes</h2><a class="ver-todo" href="#/a/llamadas">Ver todo</a></div>' +
       (pend.length ? '<div class="lista">' + pend.slice(0, 6).map(itemLlamada).join('') + '</div>' : '<div class="vacio">No tienes llamadas pendientes para hoy.</div>') + '</div>' +
-      '<div class="menu-agente"><a class="btn ancho" href="#/" data-catalogo>' + ic('edificio', 20) + 'Ver mi catálogo público</a>' +
+      '<div class="menu-agente">' + (admin ? '<a class="btn ancho" href="#/a/agentes">' + ic('gente', 20) + 'Agentes</a>' : '') +
+      '<a class="btn ancho" href="#/" data-catalogo>' + ic('edificio', 20) + 'Ver el catálogo público</a>' +
       '<a class="btn ancho" href="#/a/cambiar-contrasena">' + ic('candado', 20) + 'Cambiar contraseña</a>' +
       '<div class="fila-btns"><button class="btn chico" data-recargar>' + ic('recargar', 18) + 'Actualizar datos</button><button class="btn chico peligro" data-salir>' + ic('salir', 18) + 'Cerrar sesión</button></div></div>' +
       '</div>' + nav('inicio'), function (app) {
@@ -869,14 +936,21 @@
   };
 
   VISTAS['cambiar-contrasena'] = function () {
-    pintar('<div class="pantalla">' + cabVolver('Cambiar contraseña') +
-      '<p class="intro">Usa al menos ' + MIN_CONTRASENA + ' caracteres. Puedes combinar letras, números y símbolos. Al cambiarla se cerrará la sesión en tus otros dispositivos.</p>' +
-      '<form class="formulario" novalidate>' + campoClave('actual', 'Contraseña actual', 'current-password') +
+    var obligatorio = !!(S.agente && S.agente.debeCambiar);
+    pintar('<div class="pantalla">' + (obligatorio ? '<div class="cab"><h1>Crea tu contraseña</h1></div>' +
+        '<p class="intro">Hola' + (S.agente.Nombre ? ', ' + esc(S.agente.Nombre.split(' ')[0]) : '') + '. Por seguridad, cambia la contraseña temporal que te dieron antes de continuar. Usa al menos ' + MIN_CONTRASENA + ' caracteres.</p>'
+      : cabVolver('Cambiar contraseña') +
+        '<p class="intro">Usa al menos ' + MIN_CONTRASENA + ' caracteres. Puedes combinar letras, números y símbolos. Al cambiarla se cerrará la sesión en tus otros dispositivos.</p>') +
+      '<form class="formulario" novalidate>' + campoClave('actual', obligatorio ? 'Contraseña temporal' : 'Contraseña actual', 'current-password') +
       campoClave('nueva', 'Nueva contraseña', 'new-password') + campoClave('repetir', 'Repite la nueva contraseña', 'new-password') +
-      '<div class="acciones-form"><button class="btn primario ancho" type="submit">Guardar nueva contraseña</button></div></form></div>' + nav('inicio'), function (app) {
+      '<div class="acciones-form"><button class="btn primario ancho" type="submit">Guardar nueva contraseña</button>' +
+      (obligatorio ? '<button class="btn ancho peligro" type="button" data-salir>' + ic('salir', 18) + 'Cerrar sesión</button>' : '') + '</div></form></div>' + (obligatorio ? '' : nav('inicio')), function (app) {
         enlazarVolver(app);
+        var salir = app.querySelector('[data-salir]');
+        if (salir) salir.onclick = salirAgente;
         enlazarVerClave(app);
         var form = app.querySelector('form');
+        form.actual.focus();
         form.onsubmit = function (e) {
           e.preventDefault();
           var actual = form.actual.value, nueva = form.nueva.value, repetir = form.repetir.value;
@@ -894,6 +968,8 @@
             }
             S.token = r.data.token;
             guardarLocal('inmo_token', S.token);
+            if (r.data.agente) recordarAgente(r.data.agente);
+            if (obligatorio) S.db = null;
             toast('Contraseña cambiada');
             ir('#/a/inicio');
           });
@@ -903,25 +979,26 @@
 
   VISTAS.llamadas = function () {
     var h = hoy();
-    var pend = llamadasPendientes();
+    var pend = delAgente(llamadasPendientes());
     var grupos = [
       ['Atrasadas', pend.filter(function (l) { return l.Fecha && l.Fecha < h; }), true],
       ['Hoy', pend.filter(function (l) { return l.Fecha === h; })],
       ['Próximas', pend.filter(function (l) { return l.Fecha > h; })],
       ['Sin fecha', pend.filter(function (l) { return !l.Fecha; })]
     ];
-    var hechas = T('Llamadas').filter(function (l) { return l.Estado === 'Hecha'; }).sort(function (a, b) { return (b.Fecha || '').localeCompare(a.Fecha || ''); });
+    var hechas = delAgente(T('Llamadas')).filter(function (l) { return l.Estado === 'Hecha'; }).sort(function (a, b) { return (b.Fecha || '').localeCompare(a.Fecha || ''); });
     var cuerpo = grupos.filter(function (g) { return g[1].length; }).map(function (g) {
       g[1].sort(function (a, b) { return (a.Fecha || '').localeCompare(b.Fecha || ''); });
       return '<div class="seccion"><div class="seccion-cab"><h2' + (g[2] ? ' class="alerta"' : '') + '>' + g[0] + '</h2></div><div class="lista">' + g[1].map(itemLlamada).join('') + '</div></div>';
     }).join('');
-    pintar('<div class="pantalla">' + cabVolver('Llamadas', '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a>') +
+    pintar('<div class="pantalla">' + cabVolver('Llamadas', '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a>') + filtroAgente() +
       (cuerpo || '<div class="vacio">No tienes llamadas pendientes. Toca + para programar una.</div>') +
       (hechas.length ? '<button class="btn ancho" data-hechas>' + (S.verHechas ? 'Ocultar hechas' : 'Ver hechas (' + hechas.length + ')') + '</button>' +
         (S.verHechas ? '<div class="lista">' + hechas.map(itemLlamada).join('') + '</div>' : '') : '') +
       '</div>' + nav('inicio'), function (app) {
         enlazarVolver(app);
         enlazarChecks(app, VISTAS.llamadas);
+        enlazarFiltroAgente(app, VISTAS.llamadas);
         var b = app.querySelector('[data-hechas]');
         if (b) b.onclick = function () { S.verHechas = !S.verHechas; VISTAS.llamadas(); };
       });
@@ -931,7 +1008,7 @@
     if (q.tab) S.tabContactos = q.tab;
     var tab = S.tabContactos, qq = S.qContactos.toLowerCase();
     var ft = tab === 'interesado' ? S.filtroTemp : '';
-    var filas = T(TABLA_DE[tab]).filter(function (c) {
+    var filas = delAgente(T(TABLA_DE[tab])).filter(function (c) {
       if (ft && temperatura(c) !== ft) return false;
       return !qq || (c.Nombre + ' ' + c.Celular + ' ' + (c.Categoria || '')).toLowerCase().indexOf(qq) >= 0;
     }).sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
@@ -945,12 +1022,12 @@
       }
       if (tab === 'otro') extra = [c.Categoria, c.Detalle].filter(Boolean).join(' · ');
       return '<a class="item" href="#/a/contacto/' + tab + '/' + esc(c.ID) + '"><span class="avatar ' + tab + '">' + esc(iniciales(c.Nombre)) + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(c.Nombre) +
-        (tab === 'interesado' ? ' ' + tagTemp(c) : '') + (c.Origen === 'App' ? ' <span class="tag app">App</span>' : '') + '</div><div class="item-sub">' + esc(sub) + '</div>' + (extra ? '<div class="item-sub">' + esc(extra) + '</div>' : '') + '</div></a>';
+        (tab === 'interesado' ? ' ' + tagTemp(c) : '') + (c.Origen === 'App' ? ' <span class="tag app">App</span>' : '') + tagAgente(c) + '</div><div class="item-sub">' + esc(sub) + '</div>' + (extra ? '<div class="item-sub">' + esc(extra) + '</div>' : '') + '</div></a>';
     }).join('');
     pintar('<div class="pantalla"><div class="cab"><h1>Contactos</h1><a class="btn-redondo" href="#/a/contacto-form/' + tab + '" aria-label="Registrar contacto">' + ic('mas', 26) + '</a></div>' +
       '<div class="pestanas" role="tablist">' + ['interesado', 'propietario', 'otro'].map(function (t) {
         return '<button role="tab" aria-selected="' + (t === tab) + '" class="' + (t === tab ? 'activo' : '') + '" data-tab="' + t + '">' + { interesado: 'Interesados', propietario: 'Propietarios', otro: 'Otros' }[t] + '</button>';
-      }).join('') + '</div>' +
+      }).join('') + '</div>' + filtroAgente() +
       '<div class="caja-busqueda">' + ic('buscar', 20) + '<input id="qc" type="search" placeholder="Buscar por nombre o celular" aria-label="Buscar contacto" value="' + esc(S.qContactos) + '"></div>' +
       (tab === 'interesado' ? '<div class="chips" role="group" aria-label="Nivel de interés">' + [''].concat(TEMPERATURAS.slice().reverse()).map(function (t) {
         return '<button class="chip' + (ft === t ? ' activo' : '') + '" data-temp="' + t + '" aria-pressed="' + (ft === t) + '">' + (t ? '<span class="punto ' + CLASE_TEMP[t] + '"></span>' + t : 'Todos') + '</button>';
@@ -959,6 +1036,7 @@
       '</div>' + nav('contactos'), function (app) {
         app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { S.tabContactos = b.dataset.tab; VISTAS.contactos([], {}); }; });
         app.querySelectorAll('[data-temp]').forEach(function (b) { b.onclick = function () { S.filtroTemp = b.dataset.temp; VISTAS.contactos([], {}); }; });
+        enlazarFiltroAgente(app, function () { VISTAS.contactos([], {}); });
         var inp = app.querySelector('#qc');
         inp.oninput = function () {
           S.qContactos = inp.value; var pos = inp.selectionStart; VISTAS.contactos([], {});
@@ -1003,6 +1081,7 @@
     if (tipo === 'otro') datos += '<dt>Categoría</dt><dd>' + esc(c.Categoria || '—') + '</dd><dt>Detalle</dt><dd>' + esc(c.Detalle || '—') + '</dd>';
     if (c.Notas) datos += '<dt>Notas</dt><dd>' + esc(c.Notas) + '</dd>';
     datos += '<dt>Registrado</dt><dd>' + esc(String(c.FechaRegistro || '').slice(0, 10) || '—') + (c.Origen === 'App' ? ' (desde la app)' : '') + '</dd>';
+    if (esAdmin()) datos += '<dt>Agente</dt><dd>' + esc(nombreAgente(c.ID_Agente)) + (!c.ID_Agente && tipo !== 'otro' ? '<br><a href="#/a/asignar/' + TABLA_DE[tipo] + '/' + esc(c.ID) + '">Asignar a…</a>' : '') + '</dd>';
     pintar('<div class="pantalla">' + cabVolver(NOMBRE_TIPO[tipo], '<a class="btn-icono borde" href="#/a/contacto-form/' + tipo + '/' + esc(c.ID) + '" aria-label="Editar">' + ic('lapiz', 20) + '</a>') +
       '<div class="ficha"><div class="ficha-top"><span class="avatar ' + tipo + '">' + esc(iniciales(c.Nombre)) + '</span><div><h2>' + esc(c.Nombre) + '</h2>' + (tipo === 'interesado' ? tagTemp(c) : '') + '</div></div>' +
       (tel || wsp ? '<div class="fila-btns">' + (tel ? '<a class="btn chico" href="' + tel + '">' + ic('tel', 18) + 'Llamar</a>' : '') + (wsp ? '<a class="btn chico" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp', 18) + 'WhatsApp</a>' : '') + '</div>' : '') +
@@ -1053,13 +1132,13 @@
     return '<div class="prop"><a href="#/a/propiedad/' + esc(p.ID) + '" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;text-decoration:none;color:inherit">' + icTipo(p.Tipo) +
       '<div class="prop-cuerpo"><span class="prop-meta">' + esc(p.Tipo) + (p.Operacion ? ' en ' + esc(p.Operacion.toLowerCase()) : '') + ' · <span class="estado ' + esc(p.Estado) + '">' + esc(p.Estado || 'Sin estado') + '</span></span>' +
       '<span class="prop-titulo">' + esc([num(p.Area) != null ? num(p.Area) + ' m²' : (num(p.Dormitorios) != null ? num(p.Dormitorios) + ' dorm.' : ''), p.Zona].filter(Boolean).join(' · ') || 'Sin detalles') + '</span>' +
-      '<span class="prop-sub">Prop.: ' + esc(dueno ? dueno.Nombre : '—') + '</span><span class="precio">' + (dinero(p.Precio) || 'Sin precio') + '</span></div></a>' +
+      '<span class="prop-sub">Prop.: ' + esc(dueno ? dueno.Nombre : '—') + tagAgente(p) + '</span><span class="precio">' + (dinero(p.Precio) || 'Sin precio') + '</span></div></a>' +
       '<a class="btn-icono borde" href="#/a/propiedad-form/' + esc(p.ID) + '" aria-label="Editar propiedad">' + ic('lapiz', 18) + '</a></div>';
   }
 
   VISTAS.propiedades = function () {
     var f = S.filtrosProp, cf = conf(), qq = f.q.toLowerCase();
-    var props = T('Propiedades').filter(function (p) {
+    var props = delAgente(T('Propiedades')).filter(function (p) {
       if (f.tipo && p.Tipo !== f.tipo) return false;
       if (f.estado && p.Estado !== f.estado) return false;
       if (f.operacion && p.Operacion !== f.operacion) return false;
@@ -1083,10 +1162,11 @@
       '<div class="chips" role="group" aria-label="Tipo">' + [''].concat(TIPOS).map(function (t) {
         return '<button class="chip' + (f.tipo === t ? ' activo' : '') + '" data-tipo="' + t + '">' + (t ? t + 's' : 'Todas') + '</button>';
       }).join('') + '</div>' +
-      '<p class="contador">' + props.length + (props.length === 1 ? ' propiedad' : ' propiedades') + '</p>' +
+      filtroAgente() + '<p class="contador">' + props.length + (props.length === 1 ? ' propiedad' : ' propiedades') + '</p>' +
       (props.length ? '<div class="lista-props">' + props.map(tarjetaAgente).join('') + '</div>' : '<div class="vacio">No hay propiedades con esos filtros.</div>') +
       '</div>' + nav('propiedades'), function (app) {
         app.querySelectorAll('[data-tipo]').forEach(function (b) { b.onclick = function () { f.tipo = b.dataset.tipo; VISTAS.propiedades(); }; });
+        enlazarFiltroAgente(app, VISTAS.propiedades);
         app.querySelector('[data-filtros]').onclick = function () { f.abierto = !f.abierto; VISTAS.propiedades(); };
         ['estado', 'operacion', 'zona', 'precioMax'].forEach(function (k) {
           var el = app.querySelector('#f_' + k);
@@ -1133,7 +1213,8 @@
       '<dt>Operación</dt><dd>' + esc(pr.Operacion || '—') + '</dd><dt>Dirección</dt><dd>' + esc(pr.Direccion || '—') + '</dd>' +
       '<dt>Dormitorios</dt><dd>' + esc(pr.Dormitorios || '—') + '</dd><dt>Características</dt><dd>' + esc(pr.Caracteristicas || '—') + '</dd>' +
       (pr.Descripcion ? '<dt>Descripción</dt><dd>' + esc(pr.Descripcion) + '</dd>' : '') +
-      '<dt>Propietario</dt><dd>' + (dueno ? '<a href="#/a/contacto/propietario/' + esc(dueno.ID) + '">' + esc(dueno.Nombre) + '</a>' + (dueno.Celular ? '<br>' + esc(dueno.Celular) : '') : '—') + '</dd></dl>' +
+      '<dt>Propietario</dt><dd>' + (dueno ? '<a href="#/a/contacto/propietario/' + esc(dueno.ID) + '">' + esc(dueno.Nombre) + '</a>' + (dueno.Celular ? '<br>' + esc(dueno.Celular) : '') : '—') + '</dd>' +
+      (esAdmin() ? '<dt>Agente</dt><dd>' + esc(nombreAgente(pr.ID_Agente)) + '</dd>' : '') + '</dl>' +
       (activa ? '<p class="item-sub">El estado depende de la reserva activa: cambia al marcarla como concretada o cancelada.</p>'
         : '<div class="campo"><label for="f_est">Cambiar estado</label><select id="f_est">' + ESTADOS_PROP.map(function (e) { return '<option' + (e === pr.Estado ? ' selected' : '') + '>' + e + '</option>'; }).join('') + '</select></div>') + '</div>' +
       bloqueReserva +
@@ -1210,7 +1291,7 @@
 
   VISTAS.citas = function () {
     var h = hoy();
-    var todas = T('Citas').slice().sort(ordenarCitas);
+    var todas = delAgente(T('Citas')).slice().sort(ordenarCitas);
     var prox = todas.filter(function (c) { return c.Fecha >= h; });
     var pasadas = todas.filter(function (c) { return c.Fecha < h; }).reverse();
     var porDia = {};
@@ -1219,7 +1300,7 @@
       var t = f === h ? 'Hoy · ' + fechaLarga(f).toLowerCase() : fechaLarga(f);
       return '<div class="seccion"><div class="seccion-cab"><h2>' + esc(t) + '</h2></div><div class="lista">' + porDia[f].map(function (c) { return itemCita(c); }).join('') + '</div></div>';
     }).join('');
-    pintar('<div class="pantalla"><div class="cab"><h1>Citas</h1></div>' +
+    pintar('<div class="pantalla"><div class="cab"><h1>Citas</h1></div>' + filtroAgente() +
       '<a class="btn primario ancho" href="#/a/cita-nueva">' + ic('mas', 22) + 'Agendar cita</a>' +
       (bloques || '<div class="vacio">No tienes citas próximas.</div>') +
       (pasadas.length ? '<button class="btn ancho" data-pasadas>' + (S.verPasadas ? 'Ocultar citas pasadas' : 'Ver citas pasadas (' + pasadas.length + ')') + '</button>' +
@@ -1227,6 +1308,7 @@
       '</div>' + nav('citas'), function (app) {
         var b = app.querySelector('[data-pasadas]');
         if (b) b.onclick = function () { S.verPasadas = !S.verPasadas; VISTAS.citas(); };
+        enlazarFiltroAgente(app, VISTAS.citas);
       });
   };
 
@@ -1580,37 +1662,223 @@
     formReserva(r, {});
   };
 
+  /* ================= Agentes (solo administrador) ================= */
+
+  function apiAdmin(accion, datos) {
+    cargando(true);
+    return api(accion, datos).then(function (r) {
+      cargando(false);
+      if (!r.ok) { toast(r.error || 'No se pudo guardar.'); throw new Error(r.error); }
+      return r.data;
+    });
+  }
+  function plural(n, uno, varios) { return n + ' ' + (n === 1 ? uno : varios); }
+  // Semana de lunes a domingo.
+  function semanaActual() {
+    var h = hoy(), ini = sumarDias(h, -((aFecha(h).getDay() + 6) % 7));
+    return [ini, sumarDias(ini, 6)];
+  }
+  function resumenAgente(id) {
+    var sem = semanaActual();
+    function de(t) { return T(t).filter(function (x) { return x.ID_Agente === id; }); }
+    return [
+      plural(de('Interesados').length, 'interesado', 'interesados'),
+      plural(de('Propiedades').length, 'propiedad', 'propiedades'),
+      plural(de('Citas').filter(function (c) { return c.Fecha >= sem[0] && c.Fecha <= sem[1] && c.Estado !== 'Cancelada'; }).length, 'cita esta semana', 'citas esta semana'),
+      plural(de('Reservas').filter(function (r) { return r.Estado === 'Activa'; }).length, 'reserva activa', 'reservas activas')
+    ];
+  }
+  function htmlResumen(id) {
+    return '<div class="resumen-agente">' + resumenAgente(id).map(function (t) { return '<span>' + esc(t) + '</span>'; }).join('') + '</div>';
+  }
+  function tagsAgente(a) {
+    return (a.Rol === ROL_ADMIN ? ' <span class="tag propietario">Administrador</span>' : '') +
+      (agenteActivo(a) ? '' : ' <span class="tag app">Inactivo</span>');
+  }
+
+  VISTAS.agentes = function () {
+    var ags = T('Agentes').slice().sort(function (a, b) { return (agenteActivo(b) - agenteActivo(a)) || a.Nombre.localeCompare(b.Nombre); });
+    pintar('<div class="pantalla">' + cabVolver('Agentes', '<a class="btn-redondo" href="#/a/agente-form" aria-label="Nuevo agente">' + ic('mas', 26) + '</a>') +
+      '<p class="intro">Cada agente entra con su usuario y su contraseña, y solo ve sus propios registros.</p>' +
+      '<div class="lista">' + ags.map(function (a) {
+        return '<a class="item arriba' + (agenteActivo(a) ? '' : ' apagado') + '" href="#/a/agente/' + esc(a.ID) + '"><span class="avatar agente">' + esc(iniciales(a.Nombre)) + '</span><div class="item-cuerpo">' +
+          '<div class="item-titulo">' + esc(a.Nombre) + tagsAgente(a) + '</div><div class="item-sub">Usuario: ' + esc(a.Usuario) + (a.Celular ? ' · ' + esc(a.Celular) : '') + '</div>' + htmlResumen(a.ID) + '</div></a>';
+      }).join('') + '</div></div>' + nav('inicio'), function (app) { enlazarVolver(app, '#/a/inicio'); });
+  };
+
+  VISTAS['agente-form'] = function () {
+    pintar('<div class="pantalla">' + cabVolver('Nuevo agente') +
+      '<form class="formulario" novalidate>' +
+      campo({ n: 'Nombre', l: 'Nombre', req: true, ph: 'María Fernández' }) +
+      campo({ n: 'Usuario', l: 'Usuario', req: true, ph: 'maria' }) +
+      '<p class="item-sub ayuda-campo">Con este usuario entrará a la app. Solo letras sin tildes, números, punto y guion bajo.</p>' +
+      campo({ n: 'Celular', l: 'Celular', t: 'tel', ph: '984 123 456' }) +
+      '<p class="item-sub ayuda-campo">Los clientes le escribirán a este número por WhatsApp desde el catálogo.</p>' +
+      campo({ n: 'Rol', l: 'Rol', t: 'seg', op: [['Agente', 'Agente'], [ROL_ADMIN, 'Administrador']], req: true }, 'Agente') +
+      campoClave('Contrasena', 'Contraseña temporal', 'new-password') +
+      '<p class="item-sub ayuda-campo">Mínimo ' + MIN_CONTRASENA + ' caracteres. Dásela al agente: al entrar por primera vez, la app le pedirá crear la suya.</p>' +
+      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Crear agente</button></div></form></div>', function (app) {
+        enlazarVolver(app, '#/a/agentes');
+        enlazarVerClave(app);
+        var form = app.querySelector('form');
+        form.Usuario.setAttribute('autocapitalize', 'none');
+        form.Usuario.setAttribute('autocomplete', 'off');
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(form);
+          d.Usuario = d.Usuario.toLowerCase();
+          if (!d.Nombre) return errorForm(form, 'Escribe el nombre del agente.');
+          if (!/^[a-z0-9._]{3,30}$/.test(d.Usuario)) return errorForm(form, 'El usuario debe tener de 3 a 30 caracteres: letras sin tildes, números, punto o guion bajo.');
+          if (T('Agentes').some(function (a) { return String(a.Usuario).toLowerCase() === d.Usuario; })) return errorForm(form, 'El usuario "' + d.Usuario + '" ya existe. Elige otro.');
+          if (form.Contrasena.value.length < MIN_CONTRASENA) return errorForm(form, 'La contraseña temporal debe tener al menos ' + MIN_CONTRASENA + ' caracteres.');
+          d.Contrasena = form.Contrasena.value;
+          apiAdmin('guardarAgente', { agente: d }).then(function (a) {
+            ponerEnCache('Agentes', a);
+            toast('Agente creado');
+            history.replaceState(null, '', '#/a/agente/' + a.ID); render();
+          }).catch(function () {});
+        };
+      });
+  };
+
+  VISTAS.agente = function (p) {
+    var a = buscarId('Agentes', p[0]);
+    if (!a) return ir('#/a/agentes');
+    var yo = !!S.agente && a.ID === S.agente.ID, act = agenteActivo(a);
+    // Primero el administrador que está usando la app, después los demás agentes activos.
+    var destinos = agentesActivos().filter(function (x) { return x.ID !== a.ID; }).sort(function (x, y) { return (y.ID === S.agente.ID) - (x.ID === S.agente.ID) || x.Nombre.localeCompare(y.Nombre); });
+    var debe = /^s[ií]$/i.test(String(a.DebeCambiarContrasena).trim());
+    pintar('<div class="pantalla">' + cabVolver('Agente') +
+      '<div class="ficha"><div class="ficha-top"><span class="avatar agente">' + esc(iniciales(a.Nombre)) + '</span><div><h2>' + esc(a.Nombre) + '</h2>' +
+      '<p class="item-sub">Usuario: <strong>' + esc(a.Usuario) + '</strong>' + tagsAgente(a) + '</p></div></div>' + htmlResumen(a.ID) +
+      (debe ? '<p class="item-sub">Aún no cambia su contraseña temporal.</p>' : '') + '</div>' +
+      '<form class="formulario" novalidate data-editar>' + campo({ n: 'Nombre', l: 'Nombre', req: true }, a.Nombre) + campo({ n: 'Celular', l: 'Celular', t: 'tel', ph: '984 123 456' }, a.Celular) +
+      campo({ n: 'Rol', l: 'Rol', t: 'seg', op: [['Agente', 'Agente'], [ROL_ADMIN, 'Administrador']], req: true }, a.Rol === ROL_ADMIN ? ROL_ADMIN : 'Agente') +
+      '<div class="acciones-form"><button class="btn primario ancho" type="submit">Guardar cambios</button></div></form>' +
+      '<div class="seccion"><div class="seccion-cab"><h2>Contraseña</h2></div>' +
+      '<button class="btn ancho" type="button" data-restablecer aria-expanded="false" aria-controls="zonaClave">' + ic('candado', 20) + 'Restablecer contraseña</button>' +
+      '<div class="recuadro neutro" id="zonaClave" hidden><span class="recuadro-titulo">Nueva contraseña temporal</span>' + campoClave('Temporal', 'Contraseña temporal', 'new-password') +
+      '<p class="item-sub">Se cerrarán sus sesiones abiertas y, al entrar, deberá crear una contraseña nueva.</p><button class="btn primario" type="button" data-guardar-clave>Guardar contraseña temporal</button></div></div>' +
+      '<div class="seccion"><div class="seccion-cab"><h2>Acceso</h2></div>' +
+      (yo ? '<p class="item-sub">Esta es tu cuenta. Para desactivarla, otro administrador debe hacerlo.</p>'
+        : act ? '<button class="btn peligro ancho" type="button" data-baja aria-expanded="false" aria-controls="zonaBaja">Desactivar agente</button>' +
+          '<div class="recuadro" id="zonaBaja" hidden><span class="recuadro-titulo">Desactivar a ' + esc(a.Nombre) + '</span><p class="item-sub">No podrá entrar a la app y se cerrarán sus sesiones al instante.</p>' +
+          campo({ n: 'ReasignarA', l: '¿Qué hacemos con sus registros?', t: 'select', vacio: false, req: true, op: destinos.map(function (x) { return [x.ID, 'Pasarlos a ' + x.Nombre + (x.ID === S.agente.ID ? ' (tú)' : '')]; }).concat([['', 'Dejarlos a su nombre']]) }, S.agente.ID) +
+          '<button class="btn peligro" type="button" data-confirmar-baja>Desactivar agente</button></div>'
+        : '<p class="item-sub">Este agente está desactivado: no puede entrar a la app.</p><button class="btn primario ancho" type="button" data-alta>Reactivar agente</button>') +
+      '</div></div>' + nav('inicio'), function (app) {
+        enlazarVolver(app, '#/a/agentes');
+        enlazarVerClave(app);
+        var rehacer = function () { VISTAS.agente(p); };
+        var form = app.querySelector('[data-editar]');
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(form);
+          if (!d.Nombre) return errorForm(form, 'Escribe el nombre del agente.');
+          apiAdmin('guardarAgente', { agente: { ID: a.ID, Nombre: d.Nombre, Celular: d.Celular, Rol: d.Rol } }).then(function (g) {
+            ponerEnCache('Agentes', g);
+            if (yo) recordarAgente(Object.assign({}, g, { debeCambiar: false }));
+            S.pub = null; toast('Agente guardado');
+            if (yo && g.Rol !== ROL_ADMIN) ir('#/a/inicio'); else rehacer();
+          }).catch(function () {});
+        };
+        var bRes = app.querySelector('[data-restablecer]'), zonaClave = app.querySelector('#zonaClave');
+        bRes.onclick = function () { zonaClave.hidden = !zonaClave.hidden; bRes.setAttribute('aria-expanded', String(!zonaClave.hidden)); if (!zonaClave.hidden) app.querySelector('#f_Temporal').focus(); };
+        app.querySelector('[data-guardar-clave]').onclick = function () {
+          var clave = app.querySelector('#f_Temporal').value;
+          if (clave.length < MIN_CONTRASENA) return toast('La contraseña temporal debe tener al menos ' + MIN_CONTRASENA + ' caracteres.');
+          apiAdmin('restablecerContrasena', { ID: a.ID, Contrasena: clave }).then(function (g) {
+            ponerEnCache('Agentes', g);
+            if (yo) { toast('Contraseña restablecida. Vuelve a ingresar.'); return sesionVencida(); }
+            toast('Contraseña restablecida. Deberá cambiarla al entrar.'); rehacer();
+          }).catch(function () {});
+        };
+        var bBaja = app.querySelector('[data-baja]');
+        if (bBaja) bBaja.onclick = function () {
+          var z = app.querySelector('#zonaBaja');
+          z.hidden = !z.hidden; bBaja.setAttribute('aria-expanded', String(!z.hidden));
+        };
+        var bConf = app.querySelector('[data-confirmar-baja]');
+        if (bConf) bConf.onclick = function () {
+          var hacia = app.querySelector('#f_ReasignarA').value;
+          apiAdmin('estadoAgente', { ID: a.ID, Activo: 'No', ReasignarA: hacia }).then(function (g) {
+            ponerEnCache('Agentes', g.agente); S.pub = null;
+            toast('Agente desactivado' + (g.movidos ? ' · ' + plural(g.movidos, 'registro reasignado', 'registros reasignados') : ''));
+            if (g.movidos) cargarDb(true); else rehacer();
+          }).catch(function () {});
+        };
+        var bAlta = app.querySelector('[data-alta]');
+        if (bAlta) bAlta.onclick = function () {
+          apiAdmin('estadoAgente', { ID: a.ID, Activo: 'Sí' }).then(function (g) { ponerEnCache('Agentes', g.agente); S.pub = null; toast('Agente reactivado'); rehacer(); }).catch(function () {});
+        };
+      });
+  };
+
+  // Asignar a un agente un propietario (con sus propiedades) o un interesado que llegó sin asignar.
+  VISTAS.asignar = function (p) {
+    var tabla = p[0], reg = buscarId(tabla, p[1]);
+    if (!reg || reg.ID_Agente || ['Propietarios', 'Interesados'].indexOf(tabla) < 0) return ir('#/a/inicio');
+    var tipo = tabla === 'Propietarios' ? 'propietario' : 'interesado';
+    var props = tipo === 'propietario' ? T('Propiedades').filter(function (x) { return x.ID_Propietario === reg.ID && !x.ID_Agente; }) : [];
+    pintar('<div class="pantalla">' + cabVolver('Asignar a…') +
+      '<div class="ficha compacta"><p class="item-titulo">' + esc(reg.Nombre) + ' <span class="tag ' + tipo + '">' + NOMBRE_TIPO[tipo] + '</span></p>' +
+      '<p class="item-sub">' + esc(reg.Celular || 'Sin celular') + '</p>' +
+      (props.length ? '<p class="item-sub">También se asigna: ' + esc(props.map(resumenProp).join(' · ')) + '</p>' : '') + '</div>' +
+      '<div class="seccion"><div class="seccion-cab"><h2>¿Qué agente lo atiende?</h2></div><div class="lista">' + agentesActivos().map(function (a) {
+        return '<button class="item" type="button" data-agente="' + esc(a.ID) + '"><span class="avatar agente">' + esc(iniciales(a.Nombre)) + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(a.Nombre) + tagsAgente(a) + '</div>' +
+          htmlResumen(a.ID) + '</div>' + ic('flecha', 20) + '</button>';
+      }).join('') + '</div></div></div>' + nav('inicio'), function (app) {
+        enlazarVolver(app, '#/a/inicio');
+        app.querySelectorAll('[data-agente]').forEach(function (b) {
+          b.onclick = function () {
+            apiAdmin('asignar', { tabla: tabla, id: reg.ID, agente: b.dataset.agente }).then(function (cambios) {
+              cambios.forEach(function (c) { ponerEnCache(c.tabla, c.registro); });
+              toast('Asignado a ' + nombreAgente(b.dataset.agente));
+              history.replaceState(null, '', '#/a/inicio'); render();
+            }).catch(function () {});
+          };
+        });
+      });
+  };
+
   /* ================= Modo demo (sin servidor) ================= */
 
+  // Las mismas reglas que Code.gs, con los datos guardados solo en este navegador.
   var Demo = {
     CONTRASENA: 'demo1234',
+    VERSION: 5, // si cambia, los datos de ejemplo se vuelven a crear
     REDES: { FACEBOOK: 'https://web.facebook.com/alquis.group', TIKTOK: 'https://www.tiktok.com/@alquis_group', INSTAGRAM: 'https://www.instagram.com/grupoalquis/' },
+    DATOS: ['Propietarios', 'Interesados', 'OtrosContactos', 'Propiedades', 'Citas', 'Llamadas', 'Reservas'],
+    CONTACTOS: ['Propietarios', 'Interesados', 'OtrosContactos'],
+    TABLA_CONTACTO: { Interesado: 'Interesados', Propietario: 'Propietarios', Otro: 'OtrosContactos' },
+    NOMBRE: { Propietarios: 'El propietario', Interesados: 'El interesado', OtrosContactos: 'El contacto', Propiedades: 'La propiedad', Citas: 'La cita', Llamadas: 'La llamada', Reservas: 'La reserva' },
+    OBLIGATORIOS: { Propietarios: 'Nombre', Interesados: 'Nombre', OtrosContactos: 'Nombre', Propiedades: 'Tipo', Citas: 'Fecha', Llamadas: 'ID_Contacto' },
+    prefijos: { Propietarios: 'PRO', Interesados: 'INT', OtrosContactos: 'OTR', Propiedades: 'PRP', Citas: 'CIT', Llamadas: 'LLA', Reservas: 'RES', Agentes: 'AGE' },
+    MSJ_AJENO: 'Este registro no existe o no es tuyo.',
+    MSJ_DUPLICADO: 'Este número ya está registrado por otro agente. Consulta con el administrador.',
+    MSJ_SIN_ASIGNAR: 'Primero asigna ese contacto a un agente (Inicio > Sin asignar).',
+
     cargar: function () {
       var db = leerJSON('inmo_demo_db');
+      if (db && db.Version === Demo.VERSION) return db;
+      db = Demo.inicial();
+      Demo.guardar(db);
+      return db;
+    },
+    inicial: function () {
       var h = hoy(), d = function (n) { return sumarDias(h, n); };
-      if (db) {
-        // Datos demo de versiones anteriores: quita el PIN y agrega lo nuevo.
-        var cambio = false;
-        if (!db.Sesiones || db.Config.PIN || !('FACEBOOK' in db.Config)) {
-          delete db.Config.PIN;
-          Object.keys(Demo.REDES).forEach(function (k) { if (!(k in db.Config)) db.Config[k] = Demo.REDES[k]; });
-          db.Sesiones = db.Sesiones || {};
-          cambio = true;
-        }
-        if (!db.Reservas) {
-          db.Reservas = [];
-          if (db.Propiedades.some(function (p) { return p.ID === 'PRP-0003' && p.Estado === 'Reservado'; }) && db.Interesados.some(function (i) { return i.ID === 'INT-0004'; })) {
-            db.Reservas.push({ ID: 'RES-0001', ID_Propiedad: 'PRP-0003', ID_Interesado: 'INT-0004', FechaReserva: d(-4), MontoSeparacion: '2000', FechaLimite: d(6), Estado: 'Activa', Notas: 'Pagó por transferencia.', FechaRegistro: d(-4) });
-          }
-          cambio = true;
-        }
-        if (!db.ConTemperatura) { Demo.agregarSeguimiento(db, d); cambio = true; }
-        if (cambio) Demo.guardar(db);
-        return db;
-      }
-      db = {
+      var db = {
+        Version: Demo.VERSION,
         Config: Object.assign({ NOMBRE_NEGOCIO: MARCA, WHATSAPP: '51999999999', ZONAS: 'San Jerónimo, San Sebastián, Wanchaq, Santiago, Cusco Centro', CARACTERISTICAS: 'Con título, Agua, Luz, Desagüe, Pista asfaltada, Cochera, Jardín', CATEGORIAS_OTROS: 'Notario, Municipalidad, Topógrafo, Banco, Abogado, Otro agente, Otro' }, Demo.REDES),
         Sesiones: {},
+        Fallos: {},
+        // Solo en el modo demo las contraseñas quedan en este navegador; el servidor real guarda un hash.
+        Claves: { 'AGE-0001': Demo.CONTRASENA, 'AGE-0002': Demo.CONTRASENA, 'AGE-0003': Demo.CONTRASENA },
+        Agentes: [
+          { ID: 'AGE-0001', Usuario: 'aldo', Nombre: 'Aldo Quispe', Celular: '', Rol: ROL_ADMIN, Activo: 'Sí', DebeCambiarContrasena: 'No', FechaRegistro: d(-60) },
+          { ID: 'AGE-0002', Usuario: 'maria', Nombre: 'María Fernández', Celular: '984111222', Rol: 'Agente', Activo: 'Sí', DebeCambiarContrasena: 'No', FechaRegistro: d(-40) },
+          { ID: 'AGE-0003', Usuario: 'jose', Nombre: 'José Huamán', Celular: '974333444', Rol: 'Agente', Activo: 'Sí', DebeCambiarContrasena: 'No', FechaRegistro: d(-40) }
+        ],
         Propietarios: [
           { ID: 'PRO-0001', Nombre: 'María Quispe', Celular: '984123456', Notas: '', Origen: 'Agente', FechaRegistro: d(-20) },
           { ID: 'PRO-0002', Nombre: 'Pedro Ccahua', Celular: '974555210', Notas: '', Origen: 'Agente', FechaRegistro: d(-15) },
@@ -1618,10 +1886,11 @@
           { ID: 'PRO-0004', Nombre: 'Julia Mendoza', Celular: '962410337', Notas: '', Origen: 'App', FechaRegistro: d(-1) }
         ],
         Interesados: [
-          { ID: 'INT-0001', Nombre: 'Juan Pérez', Celular: '987654321', Operacion: 'Venta', Tipo: 'Terreno', Zonas: 'San Jerónimo, San Sebastián', PresupuestoMax: '150000', AreaMin: '150', DormitoriosMin: '', Caracteristicas: 'Con título, Agua', Notas: '', Origen: 'Agente', FechaRegistro: d(-12) },
-          { ID: 'INT-0002', Nombre: 'Rosa Mamani', Celular: '965112449', Operacion: 'Venta', Tipo: 'Casa', Zonas: 'Wanchaq', PresupuestoMax: '260000', AreaMin: '', DormitoriosMin: '3', Caracteristicas: 'Cochera', Notas: '', Origen: 'Agente', FechaRegistro: d(-9) },
-          { ID: 'INT-0003', Nombre: 'Luis Condori', Celular: '942870615', Operacion: 'Venta', Tipo: 'Casa', Zonas: '', PresupuestoMax: '250000', AreaMin: '', DormitoriosMin: '', Caracteristicas: '', Notas: '', Origen: 'App', FechaRegistro: d(-2) },
-          { ID: 'INT-0004', Nombre: 'Carlos Huamán', Celular: '958221904', Operacion: 'Venta', Tipo: 'Departamento', Zonas: 'Santiago, Wanchaq', PresupuestoMax: '200000', AreaMin: '', DormitoriosMin: '2', Caracteristicas: '', Notas: '', Origen: 'Agente', FechaRegistro: d(-6) }
+          { ID: 'INT-0001', Nombre: 'Juan Pérez', Celular: '987654321', Operacion: 'Venta', Tipo: 'Terreno', Zonas: 'San Jerónimo, San Sebastián', PresupuestoMax: '150000', AreaMin: '150', DormitoriosMin: '', Caracteristicas: 'Con título, Agua', Notas: '', Origen: 'Agente', FechaRegistro: d(-12), Temperatura: 'Tibio', DetalleInteres: 'Visitó el terreno de San Jerónimo; le gustó, pero lo ve un poco caro.' },
+          { ID: 'INT-0002', Nombre: 'Rosa Mamani', Celular: '965112449', Operacion: 'Venta', Tipo: 'Casa', Zonas: 'Wanchaq', PresupuestoMax: '260000', AreaMin: '', DormitoriosMin: '3', Caracteristicas: 'Cochera', Notas: '', Origen: 'Agente', FechaRegistro: d(-9), Temperatura: 'Caliente', DetalleInteres: 'Separó la casa de San Sebastián; espera la aprobación del crédito.' },
+          { ID: 'INT-0003', Nombre: 'Luis Condori', Celular: '942870615', Operacion: 'Venta', Tipo: 'Casa', Zonas: '', PresupuestoMax: '250000', AreaMin: '', DormitoriosMin: '', Caracteristicas: '', Notas: '', Origen: 'App', FechaRegistro: d(-5), Temperatura: 'Frío', DetalleInteres: '' },
+          { ID: 'INT-0004', Nombre: 'Carlos Huamán', Celular: '958221904', Operacion: 'Venta', Tipo: 'Departamento', Zonas: 'Santiago, Wanchaq', PresupuestoMax: '200000', AreaMin: '', DormitoriosMin: '2', Caracteristicas: '', Notas: '', Origen: 'Agente', FechaRegistro: d(-6), Temperatura: 'Caliente', DetalleInteres: 'Reservó el departamento de Santiago. Firma en una semana.' },
+          { ID: 'INT-0005', Nombre: 'Elena Vargas', Celular: '951778204', Operacion: 'Venta', Tipo: 'Casa', Zonas: 'Wanchaq', PresupuestoMax: '230000', AreaMin: '', DormitoriosMin: '2', Caracteristicas: '', Notas: '', Origen: 'App', FechaRegistro: d(-1), Temperatura: 'Frío', DetalleInteres: '' }
         ],
         OtrosContactos: [
           { ID: 'OTR-0001', Nombre: 'Dr. Ramírez', Celular: '984700120', Categoria: 'Notario', Detalle: 'Notaría del centro', FechaRegistro: d(-30) },
@@ -1644,72 +1913,50 @@
           { ID: 'CIT-0005', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0004', Fecha: d(7), Hora: '10:00', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-1) },
           { ID: 'CIT-0006', ID_Interesado: '', ID_Propiedad: '', Fecha: h, Hora: '15:30', Notas: 'Quiere vender un terreno en Santiago.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0003' },
           { ID: 'CIT-0007', ID_Interesado: '', ID_Propiedad: 'PRP-0004', Fecha: d(1), Hora: '11:00', Notas: 'Tomar fotos y medidas del terreno.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0001' },
-          { ID: 'CIT-0008', ID_Interesado: '', ID_Propiedad: 'PRP-0006', Fecha: d(1), Hora: '17:00', Notas: 'Revisar la minuta de la casa reservada.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Reunión', TipoContacto: 'Otro', ID_Contacto: 'OTR-0001' },
+          { ID: 'CIT-0008', ID_Interesado: '', ID_Propiedad: 'PRP-0003', Fecha: d(1), Hora: '17:00', Notas: 'Revisar la minuta del departamento reservado.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Reunión', TipoContacto: 'Otro', ID_Contacto: 'OTR-0001' },
           { ID: 'CIT-0009', ID_Interesado: '', ID_Propiedad: '', Fecha: d(3), Hora: '10:30', Notas: 'Firmar la autorización de venta.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Reunión', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0002' },
-          { ID: 'CIT-0010', ID_Interesado: 'INT-0002', ID_Propiedad: 'PRP-0006', Fecha: d(-6), Hora: '18:00', Notas: 'Conversar la forma de pago.', Estado: 'Realizada', FechaRegistro: d(-8), TipoCita: 'Reunión', TipoContacto: 'Interesado', ID_Contacto: 'INT-0002' }
+          { ID: 'CIT-0010', ID_Interesado: 'INT-0002', ID_Propiedad: 'PRP-0006', Fecha: d(-6), Hora: '18:00', Notas: 'Conversar la forma de pago.', Estado: 'Realizada', FechaRegistro: d(-8), TipoCita: 'Reunión', TipoContacto: 'Interesado', ID_Contacto: 'INT-0002', Resultado: 'Acordó separar la casa con S/ 3 000 mientras le aprueban el crédito.' },
+          { ID: 'CIT-0011', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0001', Fecha: d(-12), Hora: '11:00', Notas: '', Estado: 'Realizada', FechaRegistro: d(-13), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: 'Le gustó el terreno, pero pidió una rebaja. Lo conversa con su familia.' },
+          { ID: 'CIT-0012', ID_Interesado: 'INT-0004', ID_Propiedad: 'PRP-0003', Fecha: d(-5), Hora: '17:00', Notas: '', Estado: 'Realizada', FechaRegistro: d(-6), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0004', Resultado: 'Le encantó. Separa mañana con S/ 2 000.' },
+          { ID: 'CIT-0013', ID_Interesado: 'INT-0003', ID_Propiedad: 'PRP-0002', Fecha: d(-3), Hora: '10:00', Notas: '', Estado: 'Cancelada', FechaRegistro: d(-4), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0003', Resultado: 'No asistió. No contestó el celular.' },
+          { ID: 'CIT-0014', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0004', Fecha: d(-1), Hora: '16:00', Notas: 'Mostrar el terreno más grande.', Estado: 'Pendiente', FechaRegistro: d(-3), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: '' },
+          { ID: 'CIT-0015', ID_Interesado: '', ID_Propiedad: 'PRP-0006', Fecha: d(-2), Hora: '11:30', Notas: 'Revisar documentos de la casa.', Estado: 'Pendiente', FechaRegistro: d(-4), TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0002', Resultado: '' }
         ],
         Reservas: [
           { ID: 'RES-0001', ID_Propiedad: 'PRP-0003', ID_Interesado: 'INT-0004', FechaReserva: d(-4), MontoSeparacion: '2000', FechaLimite: d(6), Estado: 'Activa', Notas: 'Pagó por transferencia.', FechaRegistro: d(-4) },
           { ID: 'RES-0002', ID_Propiedad: 'PRP-0006', ID_Interesado: 'INT-0002', FechaReserva: d(-6), MontoSeparacion: '3000', FechaLimite: d(2), Estado: 'Activa', Notas: 'Espera la aprobación del crédito.', FechaRegistro: d(-6) },
-          { ID: 'RES-0003', ID_Propiedad: 'PRP-0007', ID_Interesado: 'INT-0003', FechaReserva: d(-9), MontoSeparacion: '500', FechaLimite: d(-1), Estado: 'Activa', Notas: '', FechaRegistro: d(-9) },
+          { ID: 'RES-0003', ID_Propiedad: 'PRP-0007', ID_Interesado: 'INT-0004', FechaReserva: d(-9), MontoSeparacion: '500', FechaLimite: d(-1), Estado: 'Activa', Notas: 'Lo quiere para una oficina.', FechaRegistro: d(-9) },
           { ID: 'RES-0004', ID_Propiedad: 'PRP-0001', ID_Interesado: 'INT-0001', FechaReserva: d(-12), MontoSeparacion: '1000', FechaLimite: d(-5), Estado: 'Cancelada', Notas: 'Desistió por el precio.', FechaRegistro: d(-12) }
         ],
         Llamadas: [
           { ID: 'LLA-0001', TipoContacto: 'Interesado', ID_Contacto: 'INT-0002', ID_Propiedad: 'PRP-0002', Motivo: 'Enviar más datos de la casa en Wanchaq', Fecha: d(-1), Estado: 'Pendiente', FechaRegistro: d(-3) },
           { ID: 'LLA-0002', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0001', ID_Propiedad: 'PRP-0001', Motivo: 'Confirmar precio del terreno', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
           { ID: 'LLA-0003', TipoContacto: 'Interesado', ID_Contacto: 'INT-0003', ID_Propiedad: '', Motivo: 'Ofrecer casas hasta S/ 250 000', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
-          { ID: 'LLA-0004', TipoContacto: 'Otro', ID_Contacto: 'OTR-0001', ID_Propiedad: 'PRP-0004', Motivo: 'Ver minuta del terreno de San Sebastián', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
+          { ID: 'LLA-0004', TipoContacto: 'Otro', ID_Contacto: 'OTR-0001', ID_Propiedad: 'PRP-0003', Motivo: 'Ver minuta del departamento de Santiago', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
           { ID: 'LLA-0005', TipoContacto: 'Otro', ID_Contacto: 'OTR-0002', ID_Propiedad: '', Motivo: 'Cotizar plano perimétrico', Fecha: d(3), Estado: 'Pendiente', FechaRegistro: d(-1) }
         ]
       };
-      Demo.agregarSeguimiento(db, d);
-      Demo.guardar(db);
+      // Aldo (administrador), María y José tienen sus propios registros. El resto llegó desde la app y está sin asignar.
+      var duenos = {
+        'AGE-0001': ['PRO-0003', 'PRP-0003', 'PRP-0007', 'INT-0004', 'OTR-0001', 'CIT-0003', 'CIT-0006', 'CIT-0008', 'CIT-0012', 'RES-0001', 'RES-0003', 'LLA-0004'],
+        'AGE-0002': ['PRO-0001', 'PRP-0001', 'PRP-0004', 'INT-0001', 'OTR-0002', 'CIT-0001', 'CIT-0005', 'CIT-0007', 'CIT-0011', 'CIT-0014', 'RES-0004', 'LLA-0002', 'LLA-0005'],
+        'AGE-0003': ['PRO-0002', 'PRP-0002', 'PRP-0006', 'INT-0002', 'INT-0003', 'CIT-0002', 'CIT-0004', 'CIT-0009', 'CIT-0010', 'CIT-0013', 'CIT-0015', 'RES-0002', 'LLA-0001', 'LLA-0003']
+      };
+      var dueno = {};
+      Object.keys(duenos).forEach(function (a) { duenos[a].forEach(function (id) { dueno[id] = a; }); });
+      Demo.DATOS.forEach(function (t) { db[t].forEach(function (x) { x.ID_Agente = dueno[x.ID] || ''; }); });
       return db;
     },
-    // Temperatura de los interesados y citas pasadas con resultado (o pendientes de cerrar).
-    // También se aplica a los datos demo de versiones anteriores.
-    agregarSeguimiento: function (db, d) {
-      var temps = {
-        'INT-0001': ['Tibio', 'Visitó el terreno de San Jerónimo; le gustó, pero lo ve un poco caro.'],
-        'INT-0002': ['Caliente', 'Separó la casa de San Sebastián; espera la aprobación del crédito.'],
-        'INT-0003': ['Frío', ''],
-        'INT-0004': ['Caliente', 'Reservó el departamento de Santiago. Firma en una semana.']
-      };
-      db.Interesados.forEach(function (i) {
-        if ('Temperatura' in i) return;
-        var t = temps[i.ID] || ['Frío', ''];
-        i.Temperatura = t[0]; i.DetalleInteres = t[1];
-      });
-      var c10 = db.Citas.find(function (c) { return c.ID === 'CIT-0010'; });
-      if (c10 && !c10.Resultado) c10.Resultado = 'Acordó separar la casa con S/ 3 000 mientras le aprueban el crédito.';
-      function existe(tabla, id) { return db[tabla].some(function (x) { return x.ID === id; }); }
-      var nuevas = [
-        { ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0001', Fecha: d(-12), Hora: '11:00', Notas: '', Estado: 'Realizada', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: 'Le gustó el terreno, pero pidió una rebaja. Lo conversa con su familia.' },
-        { ID_Interesado: 'INT-0004', ID_Propiedad: 'PRP-0003', Fecha: d(-5), Hora: '17:00', Notas: '', Estado: 'Realizada', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0004', Resultado: 'Le encantó. Separa mañana con S/ 2 000.' },
-        { ID_Interesado: 'INT-0003', ID_Propiedad: 'PRP-0002', Fecha: d(-3), Hora: '10:00', Notas: '', Estado: 'Cancelada', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0003', Resultado: 'No asistió. No contestó el celular.' },
-        { ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0004', Fecha: d(-1), Hora: '16:00', Notas: 'Mostrar el terreno más grande.', Estado: 'Pendiente', TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: '' },
-        { ID_Interesado: '', ID_Propiedad: 'PRP-0006', Fecha: d(-2), Hora: '11:30', Notas: 'Revisar documentos de la casa.', Estado: 'Pendiente', TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0002', Resultado: '' }
-      ];
-      nuevas.forEach(function (c) {
-        if (existe('Propiedades', c.ID_Propiedad) && existe(c.TipoContacto === 'Interesado' ? 'Interesados' : 'Propietarios', c.ID_Contacto)) Demo.insertar(db, 'Citas', c);
-      });
-      db.ConTemperatura = true;
-    },
     guardar: function (db) { guardarLocal('inmo_demo_db', JSON.stringify(db)); },
-    prefijos: { Propietarios: 'PRO', Interesados: 'INT', OtrosContactos: 'OTR', Propiedades: 'PRP', Citas: 'CIT', Llamadas: 'LLA', Reservas: 'RES' },
     config: function (c) {
       return { negocio: c.NOMBRE_NEGOCIO, whatsapp: c.WHATSAPP, facebook: urlSegura(c.FACEBOOK), tiktok: urlSegura(c.TIKTOK), instagram: urlSegura(c.INSTAGRAM), zonas: lista(c.ZONAS), caracteristicas: lista(c.CARACTERISTICAS), categoriasOtros: lista(c.CATEGORIAS_OTROS) };
     },
+    falla: function (msg, duplicado) { var e = new Error(msg); e.duplicado = !!duplicado; throw e; },
+    copia: function (x) { return x ? Object.assign({}, x) : null; },
     token: function () {
       var b = new Uint8Array(32);
       (window.crypto || window.msCrypto).getRandomValues(b);
       return Array.prototype.map.call(b, function (x) { return (x + 0x100).toString(16).slice(1); }).join('');
-    },
-    sesion: function (db) {
-      var t = Demo.token();
-      db.Sesiones[t] = Date.now() + 30 * 24 * 60 * 60 * 1000;
-      Demo.guardar(db);
-      return { ok: true, data: { token: t, vence: db.Sesiones[t] } };
     },
     insertar: function (db, tabla, reg) {
       var pre = Demo.prefijos[tabla], arr = db[tabla], i = -1;
@@ -1719,134 +1966,300 @@
       var nuevo = Object.assign({}, reg, { ID: pre + '-' + ('0000' + (max + 1)).slice(-4), FechaRegistro: hoy() + ' ' + pad(new Date().getHours()) + ':' + pad(new Date().getMinutes()) });
       arr.push(nuevo); Demo.guardar(db); return nuevo;
     },
+    buscar: function (db, tabla, id) { return id ? db[tabla].find(function (x) { return x.ID === id; }) || null : null; },
+
+    /* --- Agentes y sesiones --- */
+    esAdmin: function (a) { return !!a && a.Rol === ROL_ADMIN; },
+    activo: function (a) { return !!a && agenteActivo(a); },
+    debe: function (a) { return /^s[ií]$/i.test(String(a.DebeCambiarContrasena).trim()); },
+    perfil: function (a) { return { ID: a.ID, Usuario: a.Usuario, Nombre: a.Nombre, Rol: Demo.esAdmin(a) ? ROL_ADMIN : 'Agente', debeCambiar: Demo.debe(a) }; },
+    ver: function (ag, reg) { return !!reg && (Demo.esAdmin(ag) || (!!reg.ID_Agente && reg.ID_Agente === ag.ID)); },
+    nuevaSesion: function (db, a) {
+      var t = Demo.token(), v = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      db.Sesiones[t] = { a: a.ID, v: v };
+      Demo.guardar(db);
+      return { token: t, vence: v, agente: Demo.perfil(a) };
+    },
+    sesion: function (db, token) {
+      var s = token && db.Sesiones[token];
+      var a = s && s.v > Date.now() ? Demo.buscar(db, 'Agentes', s.a) : null;
+      if (!a || !Demo.activo(a)) { if (s) { delete db.Sesiones[token]; Demo.guardar(db); } return null; }
+      return a;
+    },
+    cerrarSesiones: function (db, id) { Object.keys(db.Sesiones).forEach(function (t) { if (db.Sesiones[t].a === id) delete db.Sesiones[t]; }); },
+    // Bloqueo por usuario como en el servidor: 5 intentos fallidos bloquean ese usuario 15 minutos.
+    login: function (db, d) {
+      var u = String(d.usuario || '').trim().toLowerCase(), f = db.Fallos[u] || { n: 0, hasta: 0 };
+      if (f.hasta > Date.now()) return { ok: false, error: 'Demasiados intentos fallidos. Por seguridad, el acceso está bloqueado. Inténtalo de nuevo en ' + Math.ceil((f.hasta - Date.now()) / 60000) + ' minutos.', bloqueado: true };
+      var a = db.Agentes.find(function (x) { return x.Usuario.toLowerCase() === u; });
+      if (!a || db.Claves[a.ID] !== d.password) {
+        f.n++;
+        if (f.n >= 5) { f = { n: 0, hasta: Date.now() + 15 * 60000 }; db.Fallos[u] = f; Demo.guardar(db); return { ok: false, error: 'Demasiados intentos fallidos. Por seguridad, el acceso está bloqueado. Inténtalo de nuevo en 15 minutos.', bloqueado: true }; }
+        db.Fallos[u] = f; Demo.guardar(db);
+        var q = 5 - f.n;
+        return { ok: false, error: 'Usuario o contraseña incorrectos. En el modo demo: aldo, maria o jose, con demo1234. Te ' + (q === 1 ? 'queda 1 intento.' : 'quedan ' + q + ' intentos.') };
+      }
+      delete db.Fallos[u];
+      if (!Demo.activo(a)) { Demo.guardar(db); return { ok: false, error: 'Tu cuenta está desactivada. Consulta con el administrador.' }; }
+      return { ok: true, data: Demo.nuevaSesion(db, a) };
+    },
+    cambiarContrasena: function (db, ag, d) {
+      var nueva = String(d.nueva || '');
+      if (nueva.length < MIN_CONTRASENA) return { ok: false, error: 'La nueva contraseña debe tener al menos ' + MIN_CONTRASENA + ' caracteres.' };
+      if (db.Claves[ag.ID] !== d.actual) return { ok: false, error: 'La contraseña actual no es correcta.' };
+      if (d.actual === nueva) return { ok: false, error: 'La nueva contraseña debe ser distinta de la actual.' };
+      db.Claves[ag.ID] = nueva;
+      Demo.cerrarSesiones(db, ag.ID);
+      var a = Demo.insertar(db, 'Agentes', { ID: ag.ID, DebeCambiarContrasena: 'No' });
+      return { ok: true, data: Demo.nuevaSesion(db, a) };
+    },
+    adminsActivos: function (db, salvo) { return db.Agentes.filter(function (a) { return a.ID !== salvo && Demo.esAdmin(a) && Demo.activo(a); }).length; },
+    guardarAgente: function (db, d) {
+      d = d || {};
+      var nombre = String(d.Nombre || '').trim(), rol = d.Rol === ROL_ADMIN ? ROL_ADMIN : 'Agente';
+      if (!nombre) Demo.falla('Escribe el nombre del agente.');
+      if (d.ID) {
+        var previo = Demo.buscar(db, 'Agentes', d.ID);
+        if (!previo) Demo.falla('Este agente ya no existe.');
+        if (Demo.esAdmin(previo) && Demo.activo(previo) && rol !== ROL_ADMIN && !Demo.adminsActivos(db, previo.ID)) Demo.falla('No puedes quitar el rol al último administrador.');
+        return Demo.copia(Demo.insertar(db, 'Agentes', { ID: previo.ID, Nombre: nombre, Celular: String(d.Celular || '').trim(), Rol: rol }));
+      }
+      var u = String(d.Usuario || '').trim().toLowerCase();
+      if (!/^[a-z0-9._]{3,30}$/.test(u)) Demo.falla('El usuario debe tener de 3 a 30 caracteres: letras sin tildes, números, punto o guion bajo.');
+      if (db.Agentes.some(function (a) { return a.Usuario.toLowerCase() === u; })) Demo.falla('El usuario "' + u + '" ya existe. Elige otro.');
+      if (String(d.Contrasena || '').length < MIN_CONTRASENA) Demo.falla('La contraseña debe tener al menos ' + MIN_CONTRASENA + ' caracteres.');
+      var nuevo = Demo.insertar(db, 'Agentes', { Usuario: u, Nombre: nombre, Celular: String(d.Celular || '').trim(), Rol: rol, Activo: 'Sí', DebeCambiarContrasena: 'Sí' });
+      db.Claves[nuevo.ID] = d.Contrasena; Demo.guardar(db);
+      return Demo.copia(nuevo);
+    },
+    restablecer: function (db, d) {
+      if (String(d.Contrasena || '').length < MIN_CONTRASENA) Demo.falla('La contraseña debe tener al menos ' + MIN_CONTRASENA + ' caracteres.');
+      var a = Demo.buscar(db, 'Agentes', d.ID);
+      if (!a) Demo.falla('Este agente ya no existe.');
+      db.Claves[a.ID] = d.Contrasena;
+      Demo.cerrarSesiones(db, a.ID);
+      delete db.Fallos[a.Usuario.toLowerCase()];
+      return Demo.copia(Demo.insertar(db, 'Agentes', { ID: a.ID, DebeCambiarContrasena: 'Sí' }));
+    },
+    estadoAgente: function (db, ag, d) {
+      var a = Demo.buscar(db, 'Agentes', d.ID);
+      if (!a) Demo.falla('Este agente ya no existe.');
+      if (d.Activo === 'Sí') return { agente: Demo.copia(Demo.insertar(db, 'Agentes', { ID: a.ID, Activo: 'Sí' })), movidos: 0 };
+      if (a.ID === ag.ID) Demo.falla('No puedes desactivar tu propia cuenta.');
+      if (Demo.esAdmin(a) && !Demo.adminsActivos(db, a.ID)) Demo.falla('No puedes desactivar al último administrador.');
+      var movidos = 0;
+      if (d.ReasignarA) {
+        var destino = Demo.buscar(db, 'Agentes', d.ReasignarA);
+        if (!destino || !Demo.activo(destino) || destino.ID === a.ID) Demo.falla('Elige un agente activo para recibir sus registros.');
+        Demo.DATOS.forEach(function (t) { db[t].forEach(function (x) { if (x.ID_Agente === a.ID) { x.ID_Agente = destino.ID; movidos++; } }); });
+      }
+      Demo.cerrarSesiones(db, a.ID);
+      return { agente: Demo.copia(Demo.insertar(db, 'Agentes', { ID: a.ID, Activo: 'No' })), movidos: movidos };
+    },
+    asignar: function (db, d) {
+      if (['Propietarios', 'Interesados'].indexOf(d.tabla) < 0) Demo.falla('Solo se pueden asignar propietarios e interesados.');
+      var reg = Demo.buscar(db, d.tabla, d.id);
+      if (!reg) Demo.falla('Este registro ya no existe.');
+      if (reg.ID_Agente) Demo.falla('Este registro ya está asignado.');
+      var destino = Demo.buscar(db, 'Agentes', d.agente);
+      if (!destino || !Demo.activo(destino)) Demo.falla('Elige un agente activo.');
+      var cambios = [{ tabla: d.tabla, registro: Demo.copia(Demo.insertar(db, d.tabla, { ID: reg.ID, ID_Agente: destino.ID })) }];
+      if (d.tabla === 'Propietarios') db.Propiedades.forEach(function (p) {
+        if (p.ID_Propietario === reg.ID && !p.ID_Agente) cambios.push({ tabla: 'Propiedades', registro: Demo.copia(Demo.insertar(db, 'Propiedades', { ID: p.ID, ID_Agente: destino.ID })) });
+      });
+      return cambios;
+    },
+
+    /* --- Dueño de cada registro (igual que en Code.gs) --- */
+    tablaContacto: function (tipo) { var t = Demo.TABLA_CONTACTO[tipo]; if (!t) Demo.falla('Tipo de contacto no válido.'); return t; },
+    relaciones: function (tabla, r) {
+      var pares = [];
+      if (tabla === 'Propiedades') pares.push(['Propietarios', r.ID_Propietario]);
+      if (tabla === 'Citas') {
+        var tipo = r.TipoContacto || (r.TipoCita === 'Captación' ? 'Propietario' : 'Interesado');
+        var id = r.ID_Contacto || (tipo === 'Interesado' ? r.ID_Interesado : '');
+        pares.push(['Interesados', r.ID_Interesado], ['Propiedades', r.ID_Propiedad]);
+        if (id) pares.push([Demo.tablaContacto(tipo), id]);
+      }
+      if (tabla === 'Llamadas') {
+        if (r.ID_Contacto) pares.push([Demo.tablaContacto(r.TipoContacto), r.ID_Contacto]);
+        pares.push(['Propiedades', r.ID_Propiedad]);
+      }
+      return pares.filter(function (p) { return String(p[1] || '').trim(); });
+    },
+    relacionados: function (db, ag, pares) {
+      return pares.map(function (p) {
+        var reg = Demo.buscar(db, p[0], p[1]);
+        if (!Demo.ver(ag, reg)) Demo.falla(Demo.NOMBRE[p[0]] + ' elegido ya no existe o no es tuyo.');
+        return { tabla: p[0], reg: reg };
+      });
+    },
+    duenoNuevo: function (ag, rel) { return !Demo.esAdmin(ag) ? ag.ID : (rel.length ? rel[0].reg.ID_Agente : ag.ID); },
+    mismoAgente: function (rel, dueno) {
+      rel.forEach(function (x) { if (x.reg.ID_Agente !== dueno) Demo.falla(Demo.NOMBRE[x.tabla] + ' es de otro agente. En una cita, llamada, propiedad o reserva, todo debe ser del mismo agente.'); });
+    },
+    digitos: function (c) { var d = soloDigitos(c); return d.length >= 6 ? d.slice(-9) : ''; },
+    revisarCelular: function (db, reg, previo, dueno) {
+      if (!('Celular' in reg)) return;
+      var d = Demo.digitos(reg.Celular);
+      if (!d || (previo && Demo.digitos(previo.Celular) === d)) return;
+      if (Demo.CONTACTOS.some(function (t) { return db[t].some(function (x) { return x.ID_Agente && x.ID_Agente !== dueno && Demo.digitos(x.Celular) === d; }); })) Demo.falla(Demo.MSJ_DUPLICADO, true);
+    },
+    revisarTemperatura: function (reg, nuevo) {
+      var t = String(reg.Temperatura == null ? '' : reg.Temperatura).trim();
+      if (t && TEMPERATURAS.indexOf(t) < 0) Demo.falla('Elige un nivel de interés válido: Frío, Tibio o Caliente.');
+      if (nuevo && !t) reg.Temperatura = 'Frío';
+    },
     reservaActiva: function (db, idp, salvo) {
       return db.Reservas.find(function (r) { return r.ID_Propiedad === idp && r.Estado === 'Activa' && r.ID !== salvo; });
     },
     liberar: function (db, idp) {
-      var p = db.Propiedades.find(function (x) { return x.ID === idp; });
+      var p = Demo.buscar(db, 'Propiedades', idp);
       if (!p || p.Estado !== 'Reservado' || Demo.reservaActiva(db, idp)) return null;
-      return Object.assign({}, Demo.insertar(db, 'Propiedades', { ID: idp, Estado: 'Disponible' }));
+      return Demo.copia(Demo.insertar(db, 'Propiedades', { ID: idp, Estado: 'Disponible' }));
     },
-    // Las mismas reglas que guardarReserva() en Code.gs.
-    guardarReserva: function (db, r) {
+    guardarRegistro: function (db, ag, tabla, reg, confirmarDuplicado) {
+      if (Demo.DATOS.indexOf(tabla) < 0) Demo.falla('Tabla no válida.');
+      if (tabla === 'Reservas') Demo.falla('Las reservas se guardan con su propio formulario.');
+      reg = Object.assign({}, reg || {});
+      if (!String(reg[Demo.OBLIGATORIOS[tabla]] || '').trim()) Demo.falla('Falta el campo ' + Demo.OBLIGATORIOS[tabla] + '.');
+      delete reg.ID_Agente;
+      if (tabla === 'Citas' && reg.TipoContacto === 'Interesado' && reg.ID_Contacto) reg.ID_Interesado = reg.ID_Contacto;
+      if (tabla === 'Interesados') Demo.revisarTemperatura(reg, !reg.ID);
+      var previo = reg.ID ? Demo.buscar(db, tabla, reg.ID) : null;
+      if (reg.ID && !Demo.ver(ag, previo)) Demo.falla(Demo.MSJ_AJENO);
+      var rel = Demo.relacionados(db, ag, Demo.relaciones(tabla, Object.assign({}, previo, reg)));
+      var dueno = previo ? previo.ID_Agente : Demo.duenoNuevo(ag, rel);
+      if (!previo && !dueno) Demo.falla(Demo.MSJ_SIN_ASIGNAR);
+      Demo.mismoAgente(rel, dueno);
+      if (!Demo.esAdmin(ag) && !confirmarDuplicado && Demo.CONTACTOS.indexOf(tabla) >= 0) Demo.revisarCelular(db, reg, previo, dueno);
+      if (!previo) reg.ID_Agente = dueno;
+      if (tabla === 'Propiedades' && previo && ('Estado' in reg) && reg.Estado !== 'Reservado' && Demo.reservaActiva(db, previo.ID)) Demo.falla('Esta propiedad tiene una reserva activa. Para cambiar su estado, marca la reserva como concretada o cancelada en el detalle de la propiedad.');
+      return Demo.copia(Demo.insertar(db, tabla, reg));
+    },
+    eliminar: function (db, ag, tabla, id) {
+      if (Demo.DATOS.indexOf(tabla) < 0) Demo.falla('Tabla no válida.');
+      var previo = Demo.buscar(db, tabla, id);
+      if (!Demo.ver(ag, previo)) Demo.falla(Demo.MSJ_AJENO);
+      if (tabla === 'Propiedades' && Demo.reservaActiva(db, id)) Demo.falla('Esta propiedad tiene una reserva activa. Cancélala antes de eliminar la propiedad.');
+      db[tabla] = db[tabla].filter(function (x) { return x.ID !== id; }); Demo.guardar(db);
+      return { id: id, propiedad: tabla === 'Reservas' && previo.Estado === 'Activa' ? Demo.liberar(db, previo.ID_Propiedad) : null };
+    },
+    guardarReserva: function (db, ag, r) {
       r = r || {};
-      function error(t) { return { ok: false, error: t }; }
-      var previa = r.ID ? db.Reservas.find(function (x) { return x.ID === r.ID; }) : null;
-      if (r.ID && !previa) return error('Esta reserva ya no existe.');
+      var previa = r.ID ? Demo.buscar(db, 'Reservas', r.ID) : null;
+      if (r.ID && !Demo.ver(ag, previa)) Demo.falla(Demo.MSJ_AJENO);
       var idProp = previa ? previa.ID_Propiedad : String(r.ID_Propiedad || '').trim();
       var idInt = ('ID_Interesado' in r || !previa) ? String(r.ID_Interesado || '').trim() : previa.ID_Interesado;
-      if (!idProp) return error('Elige la propiedad que se reserva.');
-      if (!idInt) return error('Elige al interesado que reserva.');
-      var prop = db.Propiedades.find(function (p) { return p.ID === idProp; });
-      if (!prop) return error('La propiedad ' + idProp + ' ya no existe.');
-      if (!db.Interesados.some(function (i) { return i.ID === idInt; })) return error('El interesado ya no existe.');
+      if (!idProp) Demo.falla('Elige la propiedad que se reserva.');
+      if (!idInt) Demo.falla('Elige al interesado que reserva.');
+      var rel = Demo.relacionados(db, ag, [['Propiedades', idProp], ['Interesados', idInt]]);
+      var dueno = previa ? previa.ID_Agente : Demo.duenoNuevo(ag, rel);
+      if (!previa && !dueno) Demo.falla(Demo.MSJ_SIN_ASIGNAR);
+      Demo.mismoAgente(rel, dueno);
+      var prop = rel[0].reg;
       var antes = previa ? previa.Estado : '';
       var estado = previa ? (r.Estado || antes || 'Activa') : 'Activa';
-      if (ESTADOS_RESERVA.indexOf(estado) < 0) return error('Estado de reserva no válido.');
-      if (previa && estado !== antes && antes !== 'Activa') return error('Esta reserva ya está ' + String(antes).toLowerCase() + '. Si el cliente vuelve, registra una reserva nueva.');
-      if (estado === 'Activa' && Demo.reservaActiva(db, idProp, previa && previa.ID)) return error('La propiedad ' + idProp + ' ya tiene una reserva activa. Márcala como concretada o cancelada antes de registrar otra.');
-      if (!previa && prop.Estado !== 'Disponible' && prop.Estado !== 'Reservado') return error('Solo se puede reservar una propiedad disponible. Esta figura como "' + (prop.Estado || 'sin estado') + '".');
+      if (ESTADOS_RESERVA.indexOf(estado) < 0) Demo.falla('Estado de reserva no válido.');
+      if (previa && estado !== antes && antes !== 'Activa') Demo.falla('Esta reserva ya está ' + String(antes).toLowerCase() + '. Si el cliente vuelve, registra una reserva nueva.');
+      if (estado === 'Activa' && Demo.reservaActiva(db, idProp, previa && previa.ID)) Demo.falla('La propiedad ' + idProp + ' ya tiene una reserva activa. Márcala como concretada o cancelada antes de registrar otra.');
+      if (!previa && prop.Estado !== 'Disponible' && prop.Estado !== 'Reservado') Demo.falla('Solo se puede reservar una propiedad disponible. Esta figura como "' + (prop.Estado || 'sin estado') + '".');
       var datos = { ID_Propiedad: idProp, ID_Interesado: idInt, Estado: estado };
       ['FechaReserva', 'MontoSeparacion', 'FechaLimite', 'Notas'].forEach(function (k) { if (k in r) datos[k] = String(r[k] == null ? '' : r[k]).trim(); });
       if (previa) datos.ID = previa.ID;
-      else if (!datos.FechaReserva) datos.FechaReserva = hoy();
-      var reserva = Object.assign({}, Demo.insertar(db, 'Reservas', datos));
+      else { datos.ID_Agente = dueno; if (!datos.FechaReserva) datos.FechaReserva = hoy(); }
+      var reserva = Demo.copia(Demo.insertar(db, 'Reservas', datos));
       var propiedad = null;
       if (estado === 'Activa' && prop.Estado !== 'Reservado') propiedad = Demo.insertar(db, 'Propiedades', { ID: prop.ID, Estado: 'Reservado' });
       if (estado === 'Concretada' && antes !== 'Concretada') propiedad = Demo.insertar(db, 'Propiedades', { ID: prop.ID, Estado: prop.Operacion === 'Alquiler' ? 'Alquilado' : 'Vendido' });
       if (estado === 'Cancelada' && antes !== 'Cancelada') propiedad = Demo.liberar(db, prop.ID);
-      return { ok: true, data: { reserva: reserva, propiedad: propiedad && Object.assign({}, propiedad) } };
+      return { reserva: reserva, propiedad: Demo.copia(propiedad) };
     },
-    // Igual que revisarTemperatura() en Code.gs. Devuelve el error, si lo hay.
-    revisarTemperatura: function (reg, nuevo) {
-      var t = String(reg.Temperatura == null ? '' : reg.Temperatura).trim();
-      if (t && TEMPERATURAS.indexOf(t) < 0) return 'Elige un nivel de interés válido: Frío, Tibio o Caliente.';
-      if (nuevo && !t) reg.Temperatura = 'Frío';
-      return '';
-    },
-    // Las mismas reglas que cerrarCita() en Code.gs.
-    cerrarCita: function (db, d) {
-      function error(t) { return { ok: false, error: t }; }
+    cerrarCita: function (db, ag, d) {
       var estado = { realizada: 'Realizada', reprogramada: 'Pendiente', noAsistio: 'Cancelada' }[d.Que];
-      if (!estado) return error('Elige qué pasó con la cita.');
+      if (!estado) Demo.falla('Elige qué pasó con la cita.');
       var fecha = String(d.Fecha || '').trim();
-      if (d.Que === 'reprogramada' && !esIso(fecha)) return error('Elige la nueva fecha de la cita.');
-      var cita = db.Citas.find(function (c) { return c.ID === d.ID; });
-      if (!cita) return error('Esta cita ya no existe.');
-      var k = contactoDeCita(cita);
-      var interesado = null;
+      if (d.Que === 'reprogramada' && !esIso(fecha)) Demo.falla('Elige la nueva fecha de la cita.');
+      var cita = Demo.buscar(db, 'Citas', d.ID);
+      if (!Demo.ver(ag, cita)) Demo.falla(Demo.MSJ_AJENO);
+      var k = contactoDeCita(cita), interesado = null;
       if (d.Interesado && k.tipo === 'interesado' && k.id) {
-        if (!db.Interesados.some(function (i) { return i.ID === k.id; })) return error('El interesado de esta cita ya no existe.');
+        var actual = Demo.buscar(db, 'Interesados', k.id);
+        if (!actual || actual.ID_Agente !== cita.ID_Agente) Demo.falla('El interesado de esta cita ya no existe o es de otro agente.');
         interesado = { ID: k.id };
         ['Temperatura', 'DetalleInteres', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (c) {
           if (c in d.Interesado) interesado[c] = String(d.Interesado[c] == null ? '' : d.Interesado[c]).trim();
         });
-        var et = Demo.revisarTemperatura(interesado, false);
-        if (et) return error(et);
+        Demo.revisarTemperatura(interesado, false);
       }
-      if (d.Llamada && !k.id) return error('Esta cita no tiene un contacto al que llamar.');
+      if (d.Llamada) {
+        var ct = k.id ? Demo.buscar(db, TABLA_DE[k.tipo], k.id) : null;
+        if (!ct || ct.ID_Agente !== cita.ID_Agente) Demo.falla('Esta cita no tiene un contacto al que llamar.');
+      }
       var regCita = { ID: cita.ID, Estado: estado, Resultado: d.Que === 'noAsistio' ? textoNoAsistio(d.Resultado) : String(d.Resultado || '').trim() };
       if (d.Que === 'reprogramada') { regCita.Fecha = fecha; regCita.Hora = d.Hora || ''; }
-      var out = { cita: Object.assign({}, Demo.insertar(db, 'Citas', regCita)), interesado: null, llamada: null };
-      if (interesado) out.interesado = Object.assign({}, Demo.insertar(db, 'Interesados', interesado));
-      if (d.Llamada) out.llamada = Object.assign({}, Demo.insertar(db, 'Llamadas', { TipoContacto: NOMBRE_TIPO[k.tipo], ID_Contacto: k.id, ID_Propiedad: cita.ID_Propiedad, Motivo: String(d.Llamada.Motivo || '').trim(), Fecha: d.Llamada.Fecha || '', Estado: 'Pendiente' }));
-      return { ok: true, data: out };
+      var out = { cita: Demo.copia(Demo.insertar(db, 'Citas', regCita)), interesado: null, llamada: null };
+      if (interesado) out.interesado = Demo.copia(Demo.insertar(db, 'Interesados', interesado));
+      if (d.Llamada) out.llamada = Demo.copia(Demo.insertar(db, 'Llamadas', { TipoContacto: NOMBRE_TIPO[k.tipo], ID_Contacto: k.id, ID_Propiedad: cita.ID_Propiedad, Motivo: String(d.Llamada.Motivo || '').trim(), Fecha: d.Llamada.Fecha || '', Estado: 'Pendiente', ID_Agente: cita.ID_Agente }));
+      return out;
     },
-    // Igual que datosPublicos() en Code.gs: de la reserva solo sale la fecha límite vigente.
+    // Igual que datosPublicos() en Code.gs: del agente solo sale su celular; de la reserva, la fecha límite vigente.
     publico: function (db) {
       var limites = {};
       db.Reservas.forEach(function (r) { if (r.Estado === 'Activa') limites[r.ID_Propiedad] = r.FechaLimite || ''; });
-      return db.Propiedades.filter(function (p) { return p.Estado === 'Disponible' || p.Estado === 'Reservado'; }).map(function (p) {
+      return db.Propiedades.filter(function (p) {
+        return (p.Estado === 'Disponible' || p.Estado === 'Reservado') && (!p.ID_Agente || Demo.activo(Demo.buscar(db, 'Agentes', p.ID_Agente)));
+      }).map(function (p) {
         var o = { ID: p.ID, Operacion: p.Operacion, Tipo: p.Tipo, Zona: p.Zona, Area: p.Area, Dormitorios: p.Dormitorios, Precio: p.Precio, Caracteristicas: p.Caracteristicas, Descripcion: p.Descripcion, Estado: p.Estado };
+        o.WhatsApp = p.ID_Agente ? soloDigitos(Demo.buscar(db, 'Agentes', p.ID_Agente).Celular) : '';
         if (p.Estado === 'Reservado') o.FechaLimite = esIso(limites[p.ID]) && limites[p.ID] >= hoy() ? limites[p.ID] : '';
         return o;
       });
     },
     manejar: function (req) {
-      var db = Demo.cargar(), d = req.data || {};
-      var a = req.action;
-      if (a === 'publico') return { ok: true, data: { config: Demo.config(db.Config), Propiedades: Demo.publico(db) } };
-      if (a === 'publicarPropiedad') {
-        var pr = Demo.insertar(db, 'Propietarios', { Nombre: d.Nombre, Celular: d.Celular, Notas: '', Origen: 'App' });
-        Demo.insertar(db, 'Propiedades', { ID_Propietario: pr.ID, Operacion: d.Operacion, Tipo: d.Tipo, Zona: d.Zona, Direccion: d.Direccion, Area: d.Area, Dormitorios: d.Dormitorios, Precio: d.Precio, Caracteristicas: d.Caracteristicas, Descripcion: d.Descripcion, Estado: 'Pendiente', Origen: 'App' });
-        return { ok: true };
+      var db = Demo.cargar(), d = req.data || {}, a = req.action;
+      try {
+        if (a === 'publico') return { ok: true, data: { config: Demo.config(db.Config), Propiedades: Demo.publico(db) } };
+        if (a === 'publicarPropiedad') {
+          var pr = Demo.insertar(db, 'Propietarios', { Nombre: d.Nombre, Celular: d.Celular, Notas: '', Origen: 'App', ID_Agente: '' });
+          Demo.insertar(db, 'Propiedades', { ID_Propietario: pr.ID, Operacion: d.Operacion, Tipo: d.Tipo, Zona: d.Zona, Direccion: d.Direccion, Area: d.Area, Dormitorios: d.Dormitorios, Precio: d.Precio, Caracteristicas: d.Caracteristicas, Descripcion: d.Descripcion, Estado: 'Pendiente', Origen: 'App', ID_Agente: '' });
+          return { ok: true };
+        }
+        if (a === 'registrarInteres') {
+          var r = {}; ['Nombre', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (k) { r[k] = d[k] || ''; });
+          r.Origen = 'App'; r.Temperatura = 'Frío'; r.DetalleInteres = ''; r.ID_Agente = '';
+          Demo.insertar(db, 'Interesados', r);
+          return { ok: true };
+        }
+        if (a === 'login') return Demo.login(db, d);
+        if (a === 'logout') { delete db.Sesiones[req.token]; Demo.guardar(db); return { ok: true }; }
+        var ag = Demo.sesion(db, req.token);
+        if (!ag) return { ok: false, error: 'Tu sesión venció o se cerró. Vuelve a ingresar.', auth: false };
+        if (a === 'cambiarContrasena') return Demo.cambiarContrasena(db, ag, d);
+        if (Demo.debe(ag)) return { ok: false, error: 'Antes de continuar, cambia tu contraseña.', cambiar: true };
+        if (a === 'todo') {
+          var o = { config: Demo.config(db.Config), yo: Demo.perfil(ag) };
+          Demo.DATOS.forEach(function (t) { o[t] = db[t].filter(function (x) { return Demo.ver(ag, x); }).map(Demo.copia); });
+          o.Agentes = Demo.esAdmin(ag) ? db.Agentes.map(Demo.copia) : [Demo.copia(ag)];
+          return { ok: true, data: o };
+        }
+        if (a === 'guardar') return { ok: true, data: Demo.guardarRegistro(db, ag, d.tabla, d.registro, d.confirmarDuplicado === true) };
+        if (a === 'guardarReserva') return { ok: true, data: Demo.guardarReserva(db, ag, d.registro) };
+        if (a === 'cerrarCita') return { ok: true, data: Demo.cerrarCita(db, ag, d) };
+        if (a === 'eliminar') return { ok: true, data: Demo.eliminar(db, ag, d.tabla, d.id) };
+        if (['asignar', 'guardarAgente', 'restablecerContrasena', 'estadoAgente'].indexOf(a) >= 0) {
+          if (!Demo.esAdmin(ag)) return { ok: false, error: 'Solo el administrador puede hacer esto.' };
+          if (a === 'asignar') return { ok: true, data: Demo.asignar(db, d) };
+          if (a === 'guardarAgente') return { ok: true, data: Demo.guardarAgente(db, d.agente) };
+          if (a === 'restablecerContrasena') return { ok: true, data: Demo.restablecer(db, d) };
+          if (a === 'estadoAgente') return { ok: true, data: Demo.estadoAgente(db, ag, d) };
+        }
+        return { ok: false, error: 'Acción desconocida.' };
+      } catch (e) {
+        var res = { ok: false, error: String(e.message || e) };
+        if (e.duplicado) res.duplicado = true;
+        return res;
       }
-      if (a === 'registrarInteres') {
-        var r = {}; ['Nombre', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (k) { r[k] = d[k] || ''; });
-        r.Origen = 'App'; r.Temperatura = 'Frío'; r.DetalleInteres = ''; Demo.insertar(db, 'Interesados', r); return { ok: true };
-      }
-      if (a === 'login') return d.password === Demo.CONTRASENA ? Demo.sesion(db) : { ok: false, error: 'Contraseña incorrecta. En el modo demo es demo1234.' };
-      if (a === 'logout') { delete db.Sesiones[req.token]; Demo.guardar(db); return { ok: true }; }
-      if (!req.token || !(db.Sesiones[req.token] > Date.now())) return { ok: false, error: 'Tu sesión venció o se cerró. Vuelve a ingresar.', auth: false };
-      if (a === 'cambiarContrasena') {
-        if (d.actual !== Demo.CONTRASENA) return { ok: false, error: 'La contraseña actual no es correcta.' };
-        return { ok: false, error: 'En el modo demo la contraseña es siempre demo1234. Podrás cambiarla cuando conectes tu hoja de Google.' };
-      }
-      if (a === 'todo') {
-        var o = { config: Demo.config(db.Config) };
-        Object.keys(Demo.prefijos).forEach(function (t) { o[t] = db[t].map(function (x) { return Object.assign({}, x); }); });
-        return { ok: true, data: o };
-      }
-      var MSJ_ACTIVA = 'Esta propiedad tiene una reserva activa. Para cambiar su estado, marca la reserva como concretada o cancelada en el detalle de la propiedad.';
-      if (a === 'guardar') {
-        var reg = d.registro || {};
-        if (!Demo.prefijos[d.tabla]) return { ok: false, error: 'Tabla no válida.' };
-        if (d.tabla === 'Reservas') return { ok: false, error: 'Las reservas se guardan con su propio formulario.' };
-        if (d.tabla === 'Propiedades' && reg.ID && ('Estado' in reg) && reg.Estado !== 'Reservado' && Demo.reservaActiva(db, reg.ID)) return { ok: false, error: MSJ_ACTIVA };
-        if (d.tabla === 'Interesados') { var et = Demo.revisarTemperatura(reg, !reg.ID); if (et) return { ok: false, error: et }; }
-        return { ok: true, data: Object.assign({}, Demo.insertar(db, d.tabla, reg)) };
-      }
-      if (a === 'guardarReserva') return Demo.guardarReserva(db, d.registro);
-      if (a === 'cerrarCita') return Demo.cerrarCita(db, d);
-      if (a === 'eliminar') {
-        if (!Demo.prefijos[d.tabla]) return { ok: false, error: 'Tabla no válida.' };
-        if (d.tabla === 'Propiedades' && Demo.reservaActiva(db, d.id)) return { ok: false, error: 'Esta propiedad tiene una reserva activa. Cancélala antes de eliminar la propiedad.' };
-        var borrada = db[d.tabla].find(function (x) { return x.ID === d.id; });
-        db[d.tabla] = db[d.tabla].filter(function (x) { return x.ID !== d.id; }); Demo.guardar(db);
-        var liberada = d.tabla === 'Reservas' && borrada && borrada.Estado === 'Activa' ? Demo.liberar(db, borrada.ID_Propiedad) : null;
-        return { ok: true, data: { id: d.id, propiedad: liberada } };
-      }
-      return { ok: false, error: 'Acción desconocida.' };
     }
   };
 
