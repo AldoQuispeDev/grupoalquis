@@ -18,7 +18,20 @@
   var RANGO_TEMP = { 'Caliente': 0, 'Tibio': 1, 'Frío': 2 };
   var CLASE_TEMP = { 'Frío': 'frio', 'Tibio': 'tibio', 'Caliente': 'caliente' };
   var AYUDA_TEMP = { 'Frío': 'Aún no conoce la propiedad', 'Tibio': 'Ya la conoce y está algo interesado', 'Caliente': 'Tiene interés real en comprar' };
+  var EMOJI_TEMP = { 'Frío': '❄️', 'Tibio': '🌤️', 'Caliente': '🔥' };
   var QUE_PASO = [['realizada', 'Se realizó'], ['reprogramada', 'Se reprogramó'], ['noAsistio', 'No asistió']];
+  var ESTADO_CITA_SEGUN = { realizada: 'Realizada', reprogramada: 'Pendiente', noAsistio: 'Cancelada' };
+  // Seguimiento del cliente. Sin valor (clientes antiguos) cuenta como "Activo".
+  var ESTADOS_SEG = ['Activo', 'En espera', 'Compró', 'Descartado'];
+  var AVISO = 'Te aviso cuando lo tenga';
+  // "¿Cómo te fue?" rápido: respuestas de un toque y la temperatura que sugieren.
+  var RESPUESTAS = [['Le gustó', 'Tibio'], ['Lo pensará', 'Tibio'], ['Quiere volver a verla', 'Caliente'], ['Va a separar', 'Caliente'], ['Le pareció caro', 'Frío'], ['No le interesó', 'Frío'], [AVISO, '']];
+  var RESPUESTAS_OTRO = ['Todo bien', 'Lo pensará', 'Hay que volver a reunirse', 'No le interesó'];
+  var HORAS = ['09:00', '10:00', '11:00', '15:00', '16:00', '17:00'];
+  var MOTIVOS = ['Seguimiento', 'Confirmar cita', 'Enviar información', 'Negociar precio', 'Avisar nueva opción'];
+  var ICONO_TIPO = { Terreno: 'terreno', Casa: 'casa', Departamento: 'depto', Local: 'local' };
+  // Pantallas con formulario: al llegar datos nuevos en segundo plano no se vuelven a pintar.
+  var FORMULARIOS = ['contacto-form', 'cita-nueva', 'cita', 'llamada-nueva', 'llamada', 'reserva-nueva', 'reserva', 'como-te-fue', 'propiedad-form', 'agente-form', 'agente', 'cambiar-contrasena', 'asignar'];
   var TABLA_DE = { propietario: 'Propietarios', interesado: 'Interesados', otro: 'OtrosContactos' };
   var NOMBRE_TIPO = { propietario: 'Propietario', interesado: 'Interesado', otro: 'Otro' };
   var MARCA = 'Grupo Alquis Perú';
@@ -40,7 +53,12 @@
     filtroTemp: '',
     verPasadas: false,
     verHechas: false,
-    verPorCerrar: false
+    v: 0,          // versión de los datos: sube con cada cambio
+    memo: {},      // cálculos guardados para la versión actual
+    lim: {},       // cuántos elementos mostrar en cada lista larga
+    menu: [],      // acciones del menú "⋯" de la pantalla actual
+    ultima: '',    // última dirección pintada (para conservar el desplazamiento)
+    borrador: null // datos de un guardado que falló, para corregirlos
   };
 
   /* ================= Utilidades ================= */
@@ -71,6 +89,19 @@
   function urlSegura(u) { u = String(u || '').trim(); return /^https:\/\/[^\s"'<>]+$/i.test(u) ? u : ''; }
   function marca(c) { return c && c.negocio && c.negocio !== 'Mi Inmobiliaria' ? c.negocio : MARCA; }
   function soloDigitos(t) { return String(t || '').replace(/\D/g, ''); }
+  function normalizar(t) { return String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+  function nombreCorto(n) { return String(n || '').trim().split(/\s+/)[0]; }
+  // 987654321 → "987 654 321"; +51987654321 → "+51 987 654 321".
+  function fmtCel(v) {
+    var t = String(v || '').trim(), mas = t.charAt(0) === '+', d = soloDigitos(t), pre = '';
+    if (mas && d.length > 9) { pre = '+' + d.slice(0, d.length - 9) + ' '; d = d.slice(-9); }
+    return (mas && !pre ? '+' : '') + pre + d.replace(/(\d{3})(?=\d)/g, '$1 ');
+  }
+  // 120000 → "120 000".
+  function fmtMiles(v) {
+    var p = String(v || '').replace(/[^\d.]/g, '').split('.');
+    return p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + (p.length > 1 ? '.' + p[1] : '');
+  }
   function telLink(cel) { var d = soloDigitos(cel); return d ? 'tel:' + d : ''; }
   function wspLink(cel, texto) {
     var d = soloDigitos(cel);
@@ -105,12 +136,54 @@
     return h < 12 ? 'Buenos días' : (h < 19 ? 'Buenas tardes' : 'Buenas noches');
   }
 
-  function toast(msg) {
+  // Aviso breve abajo. Con una acción muestra un botón y espera un poco más antes de irse solo.
+  function toast(msg, accion, fn) {
     var t = document.getElementById('toast');
-    t.textContent = msg;
+    t.innerHTML = '<span>' + esc(msg) + '</span>' + (accion ? '<button type="button">' + esc(accion) + '</button>' : '');
+    t.classList.toggle('con-accion', !!accion);
+    if (accion) t.lastChild.onclick = function () { t.classList.remove('ver'); fn(); };
     t.classList.add('ver');
     clearTimeout(toast._t);
-    toast._t = setTimeout(function () { t.classList.remove('ver'); }, 2400);
+    toast._t = setTimeout(function () { t.classList.remove('ver'); }, accion ? 7000 : 2600);
+  }
+
+  // Panel inferior: se cierra tocando fuera, deslizando hacia abajo o con Escape.
+  function hoja(html, alMontar) {
+    if (S.cerrarHoja) S.cerrarHoja();
+    var antes = document.activeElement, velo = document.createElement('div');
+    velo.className = 'velo';
+    velo.innerHTML = '<div class="hoja" role="dialog" aria-modal="true" tabindex="-1"><span class="asa" aria-hidden="true"></span>' + html + '</div>';
+    document.body.appendChild(velo);
+    var h = velo.firstChild, y0 = null, dy = 0;
+    function tecla(e) { if (e.key === 'Escape') cerrar(); }
+    function cerrar() {
+      velo.remove(); S.cerrarHoja = null;
+      document.removeEventListener('keydown', tecla);
+      if (antes && document.contains(antes)) antes.focus({ preventScroll: true });
+    }
+    S.cerrarHoja = cerrar;
+    document.addEventListener('keydown', tecla);
+    velo.onclick = function (e) { if (e.target === velo) cerrar(); };
+    h.addEventListener('touchstart', function (e) { y0 = h.scrollTop > 0 ? null : e.touches[0].clientY; dy = 0; }, { passive: true });
+    h.addEventListener('touchmove', function (e) { if (y0 == null) return; dy = Math.max(0, e.touches[0].clientY - y0); h.style.transform = dy ? 'translateY(' + dy + 'px)' : ''; }, { passive: true });
+    h.addEventListener('touchend', function () { if (dy > 70) cerrar(); else h.style.transform = ''; y0 = null; });
+    h.focus({ preventScroll: true });
+    if (alMontar) alMontar(h, cerrar);
+    return cerrar;
+  }
+  // Menú "⋯" y paneles de opciones: cada acción es [texto, #ruta o función, clase ("peligro" o "destacado")].
+  function abrirMenu(items, titulo) {
+    hoja((titulo || '') + '<div class="menu-lista">' + items.map(function (x, i) {
+      return '<button type="button" class="menu-item' + (x[2] ? ' ' + x[2] : '') + '" data-i="' + i + '">' + esc(x[0]) + '</button>';
+    }).join('') + '</div>', function (h, cerrar) {
+      h.querySelectorAll('[data-i]').forEach(function (b) {
+        b.onclick = function () { var x = items[b.dataset.i]; cerrar(); if (typeof x[1] === 'function') x[1](); else ir(x[1]); };
+      });
+    });
+  }
+  function botonMenu(items) {
+    S.menu = items;
+    return '<button class="btn-icono borde" type="button" data-a="menu" aria-label="Más opciones">' + ic('puntos', 22) + '</button>';
   }
   function cargando(si) { document.getElementById('cargando').hidden = !si; }
 
@@ -139,6 +212,9 @@
     recargar: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
     llamadas: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/><path d="M15 3.5a5.5 5.5 0 0 1 5.5 5.5"/>',
     flecha: '<path d="M9 5l7 7-7 7"/>',
+    puntos: '<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none"/>',
+    persona: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    llave: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14 9l2 2"/>',
     reserva: '<path d="M6.5 3.5h11v17l-5.5-3.8-5.5 3.8z"/>',
     candado: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
     ojo: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
@@ -151,10 +227,7 @@
     t = t || 22;
     return '<svg width="' + t + '" height="' + t + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + IC[n] + '</svg>';
   }
-  function icTipo(tipo) {
-    var n = { Terreno: 'terreno', Casa: 'casa', Departamento: 'depto', Local: 'local' }[tipo] || 'edificio';
-    return '<span class="tipo-icono">' + ic(n, 26) + '</span>';
-  }
+  function icTipo(tipo) { return '<span class="tipo-icono">' + ic(ICONO_TIPO[tipo] || 'edificio', 26) + '</span>'; }
 
   /* ================= Coincidencias (recomendaciones) ================= */
 
@@ -211,10 +284,42 @@
       .sort(function (a, b) { return (b.m.puntaje || 0) - (a.m.puntaje || 0); });
   }
 
+  // Compró y Descartado ya no entran en las recomendaciones.
   function interesadosPara(p, ints) {
-    return ints.map(function (i) { var m = coincidencia(i, p); return m ? { i: i, m: m } : null; })
+    return ints.filter(enSeguimiento).map(function (i) { var m = coincidencia(i, p); return m ? { i: i, m: m } : null; })
       .filter(function (x) { return x && x.m.puntaje != null && x.m.puntaje >= 40; })
       .sort(function (a, b) { return RANGO_TEMP[temperatura(a.i)] - RANGO_TEMP[temperatura(b.i)] || b.m.puntaje - a.m.puntaje; });
+  }
+
+  var CAMPOS_BUSCA = ['Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'];
+  function tieneBusqueda(i) { return CAMPOS_BUSCA.some(function (k) { return String(i[k] || '').trim(); }); }
+  function estadoSeg(i) { return ESTADOS_SEG.indexOf(i.EstadoSeguimiento) >= 0 ? i.EstadoSeguimiento : 'Activo'; }
+  function enSeguimiento(i) { var e = estadoSeg(i); return e === 'Activo' || e === 'En espera'; }
+  function coincide60(i, p) { var m = coincidencia(i, p); return !!m && m.puntaje >= 60; }
+  // Propiedades disponibles del mismo agente que le coinciden al 60 % o más.
+  function coincidenFuerte(i) {
+    if (!tieneBusqueda(i)) return [];
+    return T('Propiedades').filter(function (p) { return p.Estado === 'Disponible' && p.ID_Agente === i.ID_Agente && coincide60(i, p); });
+  }
+  // Las que todavía no se le ofrecieron a un cliente "En espera".
+  function nuevasOpciones(i) {
+    var ya = lista(i.OpcionesAvisadas);
+    return coincidenFuerte(i).filter(function (p) { return ya.indexOf(p.ID) < 0; });
+  }
+  // Clientes "En espera" que buscan algo como esta propiedad (el administrador ve los de todos).
+  function esperandoPara(p) {
+    return T('Interesados').filter(function (i) { return estadoSeg(i) === 'En espera' && tieneBusqueda(i) && coincide60(i, p); });
+  }
+  function ids(arr) { return arr.map(function (x) { return x.ID; }).join(', '); }
+  // "Te aviso cuando lo tenga": lo que coincide hoy queda como ya visto, así solo aparecen las nuevas.
+  function marcarEnEspera(i) {
+    guardarRegistro('Interesados', { ID: i.ID, EstadoSeguimiento: 'En espera', OpcionesAvisadas: ids(coincidenFuerte(i)) });
+  }
+  // Al registrar una propiedad o volverla disponible: ¿algún cliente en espera la busca?
+  function alertaEspera(p) {
+    var n = p.Estado === 'Disponible' ? esperandoPara(p).length : 0;
+    if (n) toast(plural(n, 'cliente en espera busca', 'clientes en espera buscan') + ' algo así', 'Verlos', function () { ir('#/a/propiedad/' + p.ID + '?espera=1'); });
+    return n;
   }
 
   function htmlRazones(rs) {
@@ -232,7 +337,8 @@
   /* ================= Conexión con el servidor ================= */
 
   function api(accion, data) {
-    var pedido = DEMO ? Promise.resolve(Demo.manejar({ action: accion, token: S.token, data: data || {} })) : fetch(CFG.API_URL, {
+    // En el modo demo la respuesta también llega después, como desde internet: la pantalla no se traba.
+    var pedido = DEMO ? new Promise(function (ok) { setTimeout(function () { ok(Demo.manejar({ action: accion, token: S.token, data: data || {} })); }); }) : fetch(CFG.API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ action: accion, token: S.token, data: data || {} })
@@ -246,53 +352,168 @@
     });
   }
 
+  // Trae todo del servidor en segundo plano. Mientras tanto se ve lo guardado en el celular.
   function cargarDb(forzar) {
     if (S.cargandoDb) return;
     if (S.db && !forzar && S.db._t && Date.now() - S.db._t < 30000) return;
     S.cargandoDb = true;
     api('todo').then(function (r) {
       S.cargandoDb = false;
-      if (r.ok) {
-        S.db = r.data; S.db._t = Date.now();
-        guardarLocal('inmo_cache', JSON.stringify(S.db));
-        if (r.data.yo) recordarAgente(r.data.yo);
-        render();
-      } else if (r.auth !== false && !S.db) {
-        toast(r.error || 'No se pudieron cargar los datos.');
-      }
+      if (!r.ok) { if (r.auth !== false && !r.cambiar && !S.db) toast(r.error || 'No se pudieron cargar los datos.'); return; }
+      if (S.db) delete S.db._t;
+      var antes = S.db ? JSON.stringify(S.db) : '';
+      S.db = r.data;
+      COLA.forEach(aplicar); // lo que aún no llega al servidor se sigue viendo
+      if (r.data.yo) recordarAgente(r.data.yo);
+      var cambio = JSON.stringify(S.db) !== antes;
+      S.db._t = Date.now();
+      cambiaron();
+      if (cambio) refrescar();
     });
   }
-
-  function ponerEnCache(tabla, reg) {
-    var arr = S.db[tabla] || (S.db[tabla] = []);
-    var i = arr.findIndex(function (x) { return x.ID === reg.ID; });
+  // Vuelve a pintar la pantalla con los datos nuevos, salvo que el agente esté escribiendo o en un panel.
+  function refrescar() {
+    var a = document.activeElement;
+    if (S.cerrarHoja || (a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) || FORMULARIOS.indexOf(ruta().partes[1]) >= 0) return;
+    render();
+  }
+  // La copia completa en el celular se hace justo después de pintar: con muchos datos tarda.
+  // Lo pendiente no se pierde: la cola se guarda en el acto y se vuelve a aplicar al abrir.
+  function cambiaron() {
+    S.v++;
+    clearTimeout(S.tCache);
+    S.tCache = setTimeout(function () { if (S.db) guardarLocal('inmo_cache', JSON.stringify(S.db)); }, 250);
+  }
+  function poner(tabla, reg) {
+    var arr = S.db[tabla] || (S.db[tabla] = []), i = arr.findIndex(function (x) { return x.ID === reg.ID; });
     if (i >= 0) arr[i] = reg; else arr.push(reg);
-    guardarLocal('inmo_cache', JSON.stringify(S.db));
+  }
+  function ponerEnCache(tabla, reg) { poner(tabla, reg); cambiaron(); }
+  // Guarda cálculos (Inicio, coincidencias, buscador) hasta que cambien los datos o pase un minuto.
+  function memo(k, fn) {
+    var v = S.v + ':' + Math.floor(Date.now() / 60000);
+    if (S.memo.v !== v) S.memo = { v: v };
+    return k in S.memo ? S.memo[k] : (S.memo[k] = fn());
   }
 
-  // Si el celular ya lo tiene otro agente, el servidor avisa sin dar detalles y se puede guardar igual.
-  function guardarRegistro(tabla, registro, confirmarDuplicado) {
-    cargando(true);
-    return api('guardar', { tabla: tabla, registro: registro, confirmarDuplicado: !!confirmarDuplicado }).then(function (r) {
-      cargando(false);
-      if (!r.ok && r.duplicado) {
-        if (confirm(r.error + '\n\n¿Guardar de todas formas?')) return guardarRegistro(tabla, registro, true);
-        throw new Error(r.error);
+  /* ================= Guardado al instante ================= */
+  // Lo que guarda el agente se ve en el acto y se envía al servidor en segundo plano, todo junto
+  // en una sola petición. La cola queda en el celular (una por agente): si se corta la señal,
+  // se envía al volver. Los registros nuevos usan un ID temporal hasta que el servidor da el real.
+
+  var COLA = [];
+  function claveCola() { return 'inmo_cola_' + (S.agente ? S.agente.ID : ''); }
+  function cargarCola() { COLA = S.agente ? leerJSON(claveCola()) || [] : []; }
+  function guardarCola() { if (S.agente) guardarLocal(claveCola(), COLA.length ? JSON.stringify(COLA) : null); }
+  function ahoraTexto() { var d = new Date(); return hoy() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+
+  // Aplica una acción en los datos del celular, igual que lo hará el servidor.
+  function aplicar(op) {
+    var d = op.datos;
+    if (op.accion === 'guardar') {
+      var prev = buscarId(op.tabla, d.ID || op.tmp);
+      var reg = Object.assign({}, prev || { ID_Agente: S.agente.ID, FechaRegistro: ahoraTexto() }, d, { ID: d.ID || op.tmp });
+      if (op.tabla === 'Interesados' && !prev) { reg.Temperatura = reg.Temperatura || 'Frío'; reg.EstadoSeguimiento = reg.EstadoSeguimiento || 'Activo'; }
+      if (op.tabla === 'Citas' && reg.TipoContacto === 'Interesado') reg.ID_Interesado = reg.ID_Contacto;
+      return poner(op.tabla, reg);
+    }
+    var c = buscarId('Citas', d.ID);
+    if (!c) return;
+    var cita = Object.assign({}, c, { Estado: ESTADO_CITA_SEGUN[d.Que], Resultado: d.Que === 'noAsistio' ? textoNoAsistio(d.Resultado) : d.Resultado || '' });
+    if (d.Que === 'reprogramada') { cita.Fecha = d.Fecha; cita.Hora = d.Hora || ''; }
+    poner('Citas', cita);
+    var k = contactoDeCita(c), ct = contacto(k.tipo, k.id);
+    if (d.Interesado && ct && k.tipo === 'interesado') poner('Interesados', Object.assign({}, ct, d.Interesado));
+    if (d.Llamada && ct) poner('Llamadas', { ID: op.tmp, TipoContacto: NOMBRE_TIPO[k.tipo], ID_Contacto: k.id, ID_Propiedad: c.ID_Propiedad, Motivo: d.Llamada.Motivo || '', Fecha: d.Llamada.Fecha || '', Estado: 'Pendiente', ID_Agente: c.ID_Agente, FechaRegistro: ahoraTexto() });
+  }
+
+  // Devuelve el ID del registro (temporal si es nuevo). "ruta" sirve para reabrir el formulario si falla.
+  function encolar(op) {
+    op.datos = JSON.parse(JSON.stringify(op.datos), function (k, x) { return REALES[x] || x; });
+    if (op.accion === 'guardar' ? !op.datos.ID : op.datos.Llamada) op.tmp = 'TMP-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    aplicar(op);
+    COLA.push(op);
+    guardarCola(); cambiaron(); enviar();
+    return op.accion === 'guardar' ? op.datos.ID || op.tmp : op.datos.ID;
+  }
+  function guardarRegistro(tabla, datos, ruta) { return encolar({ accion: 'guardar', tabla: tabla, datos: datos, ruta: ruta }); }
+
+  function enviar() {
+    if (S.enviando || !COLA.length || !S.token) return;
+    S.enviando = true;
+    var lote = COLA.slice();
+    api('lote', { ops: lote }).then(function (r) {
+      S.enviando = false;
+      if (!r.ok) {
+        if (r.auth !== false && !r.cambiar) toast('Sin señal: lo guardado está seguro en tu celular y se enviará cuando vuelva.', 'Reintentar', enviar);
+        return avisarVacia(false);
       }
-      if (!r.ok) { toast(r.error || 'No se pudo guardar.'); throw new Error(r.error); }
-      ponerEnCache(tabla, r.data);
-      return r.data;
+      var recargar = false, error = null;
+      r.data.forEach(function (res, i) {
+        var op = lote[i];
+        if (res.omitida || COLA.indexOf(op) < 0) return; // depende de otra: se reintenta con ella
+        if (res.duplicado && confirm(res.error + '\n\n¿Guardar de todas formas?')) { op.confirmarDuplicado = true; return; }
+        if (res.ok) { COLA.splice(COLA.indexOf(op), 1); return recibir(op, res.data); }
+        quitar(op);
+        recargar = true;
+        if (!res.duplicado) error = [res.error, op];
+      });
+      guardarCola(); cambiaron();
+      if (!COLA.length || error) avisarVacia(!error);
+      if (recargar) cargarDb(true); else refrescar();
+      if (error) toast('No se pudo guardar: ' + error[0], error[1].ruta ? 'Corregir' : '', function () { S.borrador = error[1].datos; ir(error[1].ruta); });
+      if (COLA.length && !error) enviar();
     });
   }
+  // Saca de la cola una acción que falló y también las que dependían de ella (usaban su ID temporal).
+  function quitar(op) {
+    COLA.splice(COLA.indexOf(op), 1);
+    if (op.tmp) COLA.filter(function (o) { return JSON.stringify(o.datos).indexOf(op.tmp) >= 0; }).forEach(quitar);
+  }
+  function recibir(op, data) {
+    var nuevo = op.accion === 'guardar' ? data : data.llamada;
+    if (op.tmp && nuevo) cambiarId(op.tmp, nuevo.ID);
+    if (op.accion === 'guardar') return poner(op.tabla, data);
+    [['cita', 'Citas'], ['interesado', 'Interesados'], ['llamada', 'Llamadas']].forEach(function (x) { if (data[x[0]]) poner(x[1], data[x[0]]); });
+  }
+  // Cambia un ID temporal por el real en los datos, en la cola y en la dirección actual.
+  // REALES recuerda el cambio, por si una pantalla abierta todavía tiene el ID temporal.
+  var REALES = {};
+  function cambiarId(tmp, real) {
+    REALES[tmp] = real;
+    function r(t) { return t.split(tmp).join(real); }
+    S.db = JSON.parse(r(JSON.stringify(S.db)));
+    // Se cambian los datos de cada acción sin crear acciones nuevas: el envío en curso las reconoce.
+    COLA.forEach(function (op) { op.datos = JSON.parse(r(JSON.stringify(op.datos))); });
+    if (location.hash.indexOf(tmp) >= 0) history.replaceState(null, '', r(location.hash));
+  }
+  // Las reservas y lo que se elimina esperan a que todo lo anterior llegue al servidor.
+  function sinPendientes() {
+    return new Promise(function (ok, mal) {
+      if (!COLA.length) return ok();
+      S.alVaciar = { ok: ok, mal: mal };
+      enviar();
+    });
+  }
+  function avisarVacia(bien) {
+    var a = S.alVaciar;
+    S.alVaciar = null;
+    if (a) (bien ? a.ok : a.mal)(new Error('pendientes'));
+  }
+  // Toma los datos de un guardado que falló, para volver a llenar el formulario.
+  function tomarBorrador() { var b = S.borrador; S.borrador = null; return b; }
 
-  // El servidor guarda la reserva y cambia el estado de la propiedad en un solo paso.
+  // Las reservas no se pueden deshacer: esperan la respuesta del servidor.
   function guardarReserva(registro) {
     cargando(true);
-    return api('guardarReserva', { registro: registro }).then(function (r) {
+    return sinPendientes().then(function () {
+      registro = JSON.parse(JSON.stringify(registro), function (k, x) { return REALES[x] || x; });
+      return api('guardarReserva', { registro: registro });
+    }, function (e) { cargando(false); throw e; }).then(function (r) {
       cargando(false);
       if (!r.ok) { toast(r.error || 'No se pudo guardar la reserva.'); throw new Error(r.error); }
-      ponerEnCache('Reservas', r.data.reserva);
-      if (r.data.propiedad) ponerEnCache('Propiedades', r.data.propiedad);
+      ['reserva:Reservas', 'propiedad:Propiedades', 'interesado:Interesados'].forEach(function (x) { x = x.split(':'); if (r.data[x[0]]) poner(x[1], r.data[x[0]]); });
+      cambiaron();
       S.pub = null;
       return r.data.reserva;
     });
@@ -300,24 +521,27 @@
 
   function eliminarRegistro(tabla, id) {
     cargando(true);
-    return api('eliminar', { tabla: tabla, id: id }).then(function (r) {
+    return sinPendientes().then(function () { id = REALES[id] || id; return api('eliminar', { tabla: tabla, id: id }); }, function (e) { cargando(false); throw e; }).then(function (r) {
       cargando(false);
       if (!r.ok) { toast(r.error || 'No se pudo eliminar.'); throw new Error(r.error); }
       S.db[tabla] = (S.db[tabla] || []).filter(function (x) { return x.ID !== id; });
-      if (r.data && r.data.propiedad) ponerEnCache('Propiedades', r.data.propiedad);
-      guardarLocal('inmo_cache', JSON.stringify(S.db));
+      if (r.data && r.data.propiedad) poner('Propiedades', r.data.propiedad);
+      cambiaron();
     });
   }
 
   function olvidarSesion() {
-    S.token = ''; S.db = null; S.agente = null; S.filtroAgente = '';
+    S.token = ''; S.db = null; S.agente = null; S.filtroAgente = ''; S.qContactos = ''; S.filtroTemp = ''; S.lim = {}; COLA = [];
     guardarLocal('inmo_token', null); guardarLocal('inmo_cache', null); guardarLocal('inmo_agente', null);
   }
   function recordarAgente(a) {
+    var otro = !S.agente || S.agente.ID !== a.ID;
     S.agente = { ID: a.ID, Usuario: a.Usuario, Nombre: a.Nombre, Rol: a.Rol, debeCambiar: !!a.debeCambiar };
     guardarLocal('inmo_agente', JSON.stringify(S.agente));
+    if (otro) cargarCola();
   }
   function salirAgente() {
+    if (COLA.length && !confirm('Tienes ' + plural(COLA.length, 'cambio que aún no se envía', 'cambios que aún no se envían') + ' (falta señal). Se enviarán cuando vuelvas a entrar. ¿Cerrar sesión igual?')) return;
     if (S.token) api('logout');
     olvidarSesion();
     ir('#/');
@@ -357,7 +581,7 @@
     var sel = app.querySelector('[data-filtro-agente]');
     if (sel) sel.onchange = function () { S.filtroAgente = sel.value; rehacer(); };
   }
-  function buscarId(tabla, id) { return T(tabla).find(function (x) { return x.ID === id; }); }
+  function buscarId(tabla, id) { id = REALES[id] || id; return T(tabla).find(function (x) { return x.ID === id; }); }
   function conf() { return (S.db && S.db.config) || (S.pub && S.pub.config) || { zonas: [], caracteristicas: [], categoriasOtros: [] }; }
   function contacto(tipo, id) { return buscarId(TABLA_DE[tipo] || '', id); }
   function tipoDeLlamada(l) { return { Interesado: 'interesado', Propietario: 'propietario', Otro: 'otro' }[l.TipoContacto] || 'otro'; }
@@ -369,7 +593,6 @@
     if (p.Zona) partes.push(p.Zona);
     return partes.join(' · ');
   }
-  function citasActivas() { return T('Citas').filter(function (c) { return c.Estado !== 'Cancelada'; }); }
   function llamadasPendientes() { return T('Llamadas').filter(function (l) { return l.Estado !== 'Hecha'; }); }
   function ordenarCitas(a, b) { return (a.Fecha + (a.Hora || '99')).localeCompare(b.Fecha + (b.Hora || '99')); }
   function tipoDeCita(c) { return c.TipoCita || 'Visita'; }
@@ -448,27 +671,102 @@
       }
       if (SOLO_ADMIN.indexOf(p[1]) >= 0 && !esAdmin()) return ir('#/a/inicio');
       if (!S.db) { pintar('<div class="pantalla"><div class="vacio">Cargando tus datos…</div></div>'); cargarDb(true); return; }
-      cargarDb(false);
-      var v = VISTAS[p[1]] || VISTAS.inicio;
-      return v(p.slice(2), r.q);
+      // Primero se pinta con lo guardado en el celular; después se piden datos nuevos.
+      (VISTAS[p[1]] || VISTAS.inicio)(p.slice(2), r.q);
+      return cargarDb(false);
     }
     if ((!p.length || p[0] === 'agente') && S.token) return ir('#/a/inicio');
     var vp = { agente: vLogin, publicar: vPublicar, busco: vBusco, p: vDetallePub }[p[0]] || vCatalogo;
     vp(p.slice(1), r.q);
   }
+  // Si se vuelve a pintar la misma pantalla (datos nuevos, "Ver más"), se conserva el desplazamiento.
   function pintar(html, alMontar) {
-    var app = document.getElementById('app');
+    var app = document.getElementById('app'), misma = S.ultima === location.hash, y = window.scrollY;
+    if (!misma) {
+      if (S.cerrarHoja) S.cerrarHoja();
+      // Un aviso con botón es de la pantalla anterior: se cierra para no confundir.
+      var t = document.getElementById('toast');
+      if (t.classList.contains('con-accion')) t.classList.remove('ver');
+    }
     app.innerHTML = html;
-    window.scrollTo(0, 0);
+    S.ultima = location.hash;
+    window.scrollTo(0, misma ? y : 0);
     if (alMontar) alMontar(app);
   }
   window.addEventListener('hashchange', render);
+  window.addEventListener('online', function () { enviar(); });
 
+  // Un solo manejador para los botones que se repiten en muchas pantallas (data-a="acción").
+  var ACC = {
+    menu: function () { abrirMenu(S.menu); },
+    fab: abrirRegistrar,
+    temp: function (el) { panelTemp(el.dataset.id); },
+    hecha: function (el) {
+      var l = buscarId('Llamadas', el.dataset.id);
+      if (!l) return;
+      var est = l.Estado === 'Hecha' ? 'Pendiente' : 'Hecha';
+      guardarRegistro('Llamadas', { ID: l.ID, Estado: est });
+      toast(est === 'Hecha' ? 'Llamada hecha' : 'Llamada pendiente');
+      render();
+    },
+    mas: function (el) { S.lim[el.dataset.k] = (S.lim[el.dataset.k] || 20) + Number(el.dataset.paso || 20); render(); },
+    ok: function (el) { panelOk(el.dataset.id); },
+    reprog: function (el) { panelReprog(el.dataset.id); },
+    falto: function (el) {
+      var c = buscarId('Citas', el.dataset.id);
+      cerrarRapido(c, { Que: 'noAsistio', Resultado: '' });
+      toast('Anotado: no asistió', 'Reprogramar', function () { panelReprog(c.ID); });
+    },
+    // Al llamar o escribir por una opción nueva, esa propiedad deja de mostrarse como nueva.
+    avisada: function (el) {
+      var i = buscarId('Interesados', el.dataset.id);
+      if (i) guardarRegistro('Interesados', { ID: i.ID, OpcionesAvisadas: lista(i.OpcionesAvisadas).concat(lista(el.dataset.p)).join(', ') });
+      setTimeout(render, 300);
+    }
+  };
+  document.addEventListener('click', function (e) {
+    var r = e.target;
+    // Las opciones con data-toggle se pueden desmarcar tocándolas otra vez.
+    if (r.matches('input[type=radio][data-toggle]')) {
+      var on = r.dataset.on;
+      document.querySelectorAll('input[name="' + r.name + '"]').forEach(function (x) { delete x.dataset.on; });
+      if (on) { r.checked = false; r.dispatchEvent(new Event('change', { bubbles: true })); } else r.dataset.on = '1';
+    }
+    var el = r.closest('[data-a]');
+    if (!el || !ACC[el.dataset.a]) return;
+    if (el.tagName !== 'A') e.preventDefault();
+    ACC[el.dataset.a](el);
+  });
+  // Elegir un día u hora rápida borra "Otra fecha u hora", y al revés.
+  document.addEventListener('change', function (e) {
+    var t = e.target, f = t.form, par = { Dia: 'OtraFecha', Hr: 'OtraHora' }[t.name];
+    if (!f) return;
+    if (par && f[par]) f[par].value = '';
+    if (t.name === 'OtraFecha' || t.name === 'OtraHora') f.querySelectorAll('[name=' + (t.name === 'OtraFecha' ? 'Dia' : 'Hr') + ']').forEach(function (x) { x.checked = false; delete x.dataset.on; });
+  });
+  // Celular y precios se ordenan solos mientras se escriben.
+  document.addEventListener('input', function (e) {
+    var t = e.target, f = t.dataset && t.dataset.fmt;
+    if (!f) return;
+    var alFinal = t.selectionStart === t.value.length, v = f === 'cel' ? fmtCel(t.value) : fmtMiles(t.value);
+    if (v !== t.value) { t.value = v; if (alFinal) t.setSelectionRange(v.length, v.length); }
+  });
+
+  // Barra inferior con el botón + flotante para registrar.
   function nav(activo) {
-    var it = [['inicio', 'casa', 'Inicio'], ['contactos', 'gente', 'Contactos'], ['propiedades', 'edificio', 'Propiedades'], ['citas', 'cal', 'Citas']];
-    return '<nav class="nav" aria-label="Secciones"><div class="nav-interna">' + it.map(function (x) {
-      return '<a href="#/a/' + x[0] + '"' + (x[0] === activo ? ' class="activo" aria-current="page"' : '') + '>' + ic(x[1], 24) + x[2] + '</a>';
-    }).join('') + '</div></nav>';
+    var it = [['inicio', 'casa', 'Mi día'], ['contactos', 'gente', 'Contactos'], ['propiedades', 'edificio', 'Propiedades'], ['citas', 'cal', 'Citas']];
+    return '<button class="fab" type="button" data-a="fab" aria-label="Registrar algo nuevo">' + ic('mas', 30) + '</button>' +
+      '<nav class="nav" aria-label="Secciones"><div class="nav-interna">' + it.map(function (x) {
+        return '<a href="#/a/' + x[0] + '"' + (x[0] === activo ? ' class="activo" aria-current="page"' : '') + '>' + ic(x[1], 24) + x[2] + '</a>';
+      }).join('') + '</div></nav>';
+  }
+  function abrirRegistrar() {
+    var op = [['persona', 'Cliente', 'contacto-form/interesado'], ['cal', 'Cita', 'cita-nueva'], ['llamadas', 'Llamada', 'llamada-nueva'], ['llave', 'Propietario', 'contacto-form/propietario'], ['edificio', 'Propiedad', 'propiedad-form']];
+    hoja('<h2 class="hoja-titulo">¿Qué quieres registrar?</h2><div class="registrar">' + op.map(function (x) {
+      return '<a href="#/a/' + x[2] + '" class="registrar-op"><span>' + ic(x[0], 28) + '</span>' + x[1] + '</a>';
+    }).join('') + '</div><a class="enlace centrado" href="#/a/contacto-form/otro">Otro contacto (notario, banco…)</a>', function (h, cerrar) {
+      h.querySelectorAll('a').forEach(function (a) { a.addEventListener('click', cerrar); });
+    });
   }
   function cabVolver(titulo, extra) {
     return '<div class="cab"><div class="cab-izq"><button class="volver" data-volver aria-label="Volver">' + ic('atras', 24) + '</button><h1>' + esc(titulo) + '</h1></div>' + (extra || '') + '</div>';
@@ -481,40 +779,39 @@
 
   /* ================= Formularios genéricos ================= */
 
+  // Campos de formulario. Tipos: text, tel, num, precio, date, time, area, select,
+  // seg (botones), chips (una opción, se puede desmarcar), multi (varias), tipo (íconos) y temp.
   function campo(def, valor) {
-    var id = 'f_' + def.n;
-    var v = valor == null ? '' : valor;
+    var id = 'f_' + def.n, t = def.t, v = valor == null ? '' : valor;
     var opc = def.req ? '' : ' <span class="opcional">(opcional)</span>';
-    var et = '<label for="' + id + '">' + esc(def.l) + opc + '</label>';
     var h;
-    if (def.t === 'select') {
-      h = et + '<select id="' + id + '" name="' + def.n + '">' + (def.vacio !== false ? '<option value="">' + esc(def.vacio || '— Sin indicar —') + '</option>' : '') +
+    if (t === 'select') {
+      h = '<label for="' + id + '">' + esc(def.l) + opc + '</label><select id="' + id + '" name="' + def.n + '">' + (def.vacio !== false ? '<option value="">' + esc(def.vacio || '— Sin indicar —') + '</option>' : '') +
         def.op.map(function (o) {
           var val = typeof o === 'string' ? o : o[0], txt = typeof o === 'string' ? o : o[1];
           return '<option value="' + esc(val) + '"' + (String(v) === String(val) ? ' selected' : '') + '>' + esc(txt) + '</option>';
         }).join('') + '</select>';
-    } else if (def.t === 'multi') {
-      var sel = lista(v);
-      h = '<span class="etiqueta">' + esc(def.l) + opc + '</span><div class="multi">' + (def.op.length ? def.op.map(function (o) {
-        return '<label><input type="checkbox" name="' + def.n + '" value="' + esc(o) + '"' + (sel.indexOf(o) >= 0 ? ' checked' : '') + '><span>' + esc(o) + '</span></label>';
+    } else if (/^(seg|chips|multi|tipo|temp)$/.test(t)) {
+      var varias = t === 'multi', suelta = t === 'chips' || t === 'tipo';
+      var op = t === 'temp' ? TEMPERATURAS : (t === 'tipo' ? TIPOS : def.op);
+      var sel = varias ? lista(v) : [String(t === 'temp' ? temperatura({ Temperatura: v }) : v)];
+      var clase = { seg: 'segmento' + (op.length === 2 ? ' dos' : ''), chips: 'multi', multi: 'multi', tipo: 'segmento tipos', temp: 'segmento temp' }[t] + (def.clase ? ' ' + def.clase : '');
+      h = '<span class="etiqueta" id="et_' + def.n + '">' + esc(def.l) + opc + '</span><div class="' + clase + '" role="group" aria-labelledby="et_' + def.n + '">' + (op.length ? op.map(function (o) {
+        var val = typeof o === 'string' ? o : o[0], txt = esc(typeof o === 'string' ? o : o[1]), on = sel.indexOf(String(val)) >= 0;
+        if (t === 'temp') txt = '<strong>' + EMOJI_TEMP[val] + ' ' + val + '</strong><small>' + AYUDA_TEMP[val] + '</small>';
+        if (t === 'tipo') txt = ic(ICONO_TIPO[val], 24) + (val === 'Departamento' ? 'Depto.' : txt);
+        return '<label' + (t === 'temp' ? ' class="' + CLASE_TEMP[val] + '"' : '') + '><input type="' + (varias ? 'checkbox' : 'radio') + '" name="' + def.n + '" value="' + esc(val) + '"' +
+          (on ? ' checked' + (suelta ? ' data-on="1"' : '') : '') + (suelta ? ' data-toggle' : '') + '><span>' + txt + '</span></label>';
       }).join('') : '<span class="item-sub">Agrega opciones en la pestaña Config de tu hoja.</span>') + '</div>';
-    } else if (def.t === 'seg') {
-      h = '<span class="etiqueta">' + esc(def.l) + opc + '</span><div class="segmento' + (def.op.length === 2 ? ' dos' : '') + (def.clase ? ' ' + def.clase : '') + '">' + def.op.map(function (o) {
-        var val = typeof o === 'string' ? o : o[0], txt = typeof o === 'string' ? o : o[1];
-        return '<label><input type="radio" name="' + def.n + '" value="' + esc(val) + '"' + (String(v) === String(val) ? ' checked' : '') + '><span>' + esc(txt) + '</span></label>';
-      }).join('') + '</div>';
-    } else if (def.t === 'temp') {
-      var tv = temperatura({ Temperatura: v });
-      h = '<span class="etiqueta">' + esc(def.l || 'Nivel de interés') + '</span><div class="segmento temp">' + TEMPERATURAS.map(function (t) {
-        return '<label class="' + CLASE_TEMP[t] + '"><input type="radio" name="' + def.n + '" value="' + t + '"' + (t === tv ? ' checked' : '') + '><span><strong>' + t + '</strong><small>' + AYUDA_TEMP[t] + '</small></span></label>';
-      }).join('') + '</div>';
-    } else if (def.t === 'area') {
-      h = et + '<textarea id="' + id + '" name="' + def.n + '" rows="3" placeholder="' + esc(def.ph || '') + '">' + esc(v) + '</textarea>';
     } else {
-      var tipo = def.t || 'text';
-      var extra = tipo === 'num' ? ' inputmode="decimal"' : '';
-      if (tipo === 'num') tipo = 'text';
-      h = et + '<input id="' + id + '" name="' + def.n + '" type="' + tipo + '"' + extra + ' value="' + esc(v) + '" placeholder="' + esc(def.ph || '') + '"' + (def.t === 'tel' ? ' autocomplete="tel"' : '') + '>';
+      var et = '<label for="' + id + '">' + esc(def.l) + opc + '</label>';
+      if (t === 'area') h = et + '<textarea id="' + id + '" name="' + def.n + '" rows="3" placeholder="' + esc(def.ph || '') + '">' + esc(v) + '</textarea>';
+      else {
+        var extra = { num: ' inputmode="decimal"', precio: ' inputmode="numeric" data-fmt="miles"', tel: ' autocomplete="tel" data-fmt="cel"' }[t] || '';
+        if (t === 'precio') v = fmtMiles(v);
+        if (t === 'tel') v = fmtCel(v);
+        h = et + '<input id="' + id + '" name="' + def.n + '" type="' + (t === 'num' || t === 'precio' ? 'text' : t || 'text') + '"' + extra + ' value="' + esc(v) + '" placeholder="' + esc(def.ph || '') + '">';
+      }
     }
     return '<div class="campo">' + h + '</div>';
   }
@@ -544,7 +841,7 @@
         if (el.checked) d[el.name].push(el.value);
       } else if (el.type === 'radio') {
         if (el.checked) d[el.name] = el.value; else if (!(el.name in d)) d[el.name] = '';
-      } else d[el.name] = el.value.trim();
+      } else d[el.name] = el.dataset.fmt ? el.value.replace(/\s/g, '') : el.value.trim();
     });
     Object.keys(d).forEach(function (k) { if (Array.isArray(d[k])) d[k] = d[k].join(', '); });
     if (form.elements.web) d.web = form.elements.web.value;
@@ -561,32 +858,133 @@
       { n: 'Nombre', l: 'Nombre', req: true, ph: 'Juan Pérez' },
       { n: 'Celular', l: 'Celular', t: 'tel', ph: '987 654 321' },
       { n: 'Operacion', l: '¿Quiere comprar o alquilar?', t: 'seg', op: [['Venta', 'Comprar'], ['Alquiler', 'Alquilar']] },
-      { n: 'Tipo', l: '¿Qué busca?', t: 'select', op: TIPOS },
+      { n: 'Tipo', l: '¿Qué busca?', t: 'tipo' },
       { n: 'Zonas', l: 'Zonas que le interesan', t: 'multi', op: c.zonas },
-      { n: 'PresupuestoMax', l: 'Presupuesto máximo (S/)', t: 'num', ph: '150000' },
+      { n: 'PresupuestoMax', l: 'Presupuesto máximo (S/)', t: 'precio', ph: '150 000' },
       { n: 'AreaMin', l: 'Área mínima (m²)', t: 'num', ph: '150' },
       { n: 'DormitoriosMin', l: 'Dormitorios mínimos', t: 'num', ph: '2' },
       { n: 'Caracteristicas', l: 'Características que desea', t: 'multi', op: c.caracteristicas }
     ];
   }
-  // Formulario del agente: el nivel de interés va justo después del nombre y el celular.
-  function defsInteresadoAgente(c) {
-    var defs = defsInteresado(c);
-    defs.splice(2, 0, { n: 'Temperatura', t: 'temp' }, { n: 'DetalleInteres', l: 'Describe su interés', t: 'area', ph: 'Visitó el terreno y le gustó; espera su gratificación para separar' });
-    return defs;
-  }
   function defsPropiedad(c) {
     return [
       { n: 'Operacion', l: 'Operación', t: 'seg', op: OPERACIONES },
-      { n: 'Tipo', l: 'Tipo de propiedad', t: 'select', op: TIPOS, req: true, vacio: '— Elige el tipo —' },
-      { n: 'Zona', l: 'Zona', t: 'select', op: c.zonas },
+      { n: 'Tipo', l: 'Tipo de propiedad', t: 'tipo', req: true },
+      { n: 'Zona', l: 'Zona', t: 'chips', op: c.zonas },
+      { n: 'Precio', l: 'Precio (S/)', t: 'precio', ph: '120 000' },
       { n: 'Direccion', l: 'Dirección o referencia', ph: 'Av. principal 123' },
       { n: 'Area', l: 'Área (m²)', t: 'num', ph: '200' },
       { n: 'Dormitorios', l: 'Dormitorios', t: 'num', ph: '3' },
-      { n: 'Precio', l: 'Precio (S/)', t: 'num', ph: '120000' },
       { n: 'Caracteristicas', l: 'Características', t: 'multi', op: c.caracteristicas },
       { n: 'Descripcion', l: 'Descripción', t: 'area', ph: 'Detalles que ayuden al comprador.' }
     ];
+  }
+
+  /* ================= Componentes ================= */
+
+  // Etiqueta de temperatura. Si es "editable", al tocarla se cambia en dos toques.
+  function tagTemp(i, editable) {
+    var t = temperatura(i), txt = EMOJI_TEMP[t] + ' ' + t;
+    return editable && i.ID ? '<button type="button" class="tag-temp ' + CLASE_TEMP[t] + '" data-a="temp" data-id="' + esc(i.ID) + '" aria-label="' + t + '. Tocar para cambiar el nivel de interés">' + txt + '</button>'
+      : '<span class="tag-temp ' + CLASE_TEMP[t] + '">' + txt + '</span>';
+  }
+  function tagSeg(i) { var e = estadoSeg(i); return e === 'Activo' ? '' : ' <span class="tag-seg ' + normalizar(e).replace(/\s/g, '') + '">' + e + '</span>'; }
+  function panelTemp(id) {
+    var i = buscarId('Interesados', id);
+    if (!i) return;
+    hoja('<h2 class="hoja-titulo">¿Qué tan interesado está ' + esc(nombreCorto(i.Nombre)) + '?</h2><div class="segmento temp">' + TEMPERATURAS.map(function (t) {
+      return '<button type="button" class="' + CLASE_TEMP[t] + (temperatura(i) === t ? ' activo' : '') + '" data-t="' + t + '" aria-pressed="' + (temperatura(i) === t) + '"><strong>' + EMOJI_TEMP[t] + ' ' + t + '</strong><small>' + AYUDA_TEMP[t] + '</small></button>';
+    }).join('') + '</div>', function (h, cerrar) {
+      h.querySelectorAll('[data-t]').forEach(function (b) {
+        b.onclick = function () {
+          cerrar();
+          guardarRegistro('Interesados', { ID: i.ID, Temperatura: b.dataset.t });
+          toast(nombreCorto(i.Nombre) + ': ' + EMOJI_TEMP[b.dataset.t] + ' ' + b.dataset.t);
+          render();
+        };
+      });
+    });
+  }
+
+  // "¿Cuándo?": botones de día (hoy y los 6 siguientes) y de hora, más "Otra fecha u hora".
+  function campoCuando(fecha, hora, conHora) {
+    var h = hoy(), dias = [0, 1, 2, 3, 4, 5, 6].map(function (n) { return sumarDias(h, n); });
+    var otraF = fecha && dias.indexOf(fecha) < 0 ? fecha : '', otraH = hora && HORAS.indexOf(hora) < 0 ? hora : '';
+    function chip(n, v, txt, on) {
+      return '<label><input type="radio" name="' + n + '" value="' + v + '"' + (on ? ' checked' + (n === 'Hr' ? ' data-on="1"' : '') : '') + (n === 'Hr' ? ' data-toggle' : '') + '><span>' + txt + '</span></label>';
+    }
+    return '<div class="multi dias" role="group" aria-label="Día">' + dias.map(function (d, i) {
+      var x = aFecha(d);
+      return chip('Dia', d, i === 0 ? 'Hoy' : (i === 1 ? 'Mañana' : mayus(DIAS[x.getDay()].slice(0, 3)) + ' ' + x.getDate()), d === fecha);
+    }).join('') + '</div>' +
+      (conHora ? '<div class="multi horas" role="group" aria-label="Hora">' + HORAS.map(function (x) { return chip('Hr', x, x.replace(/^0/, ''), x === hora); }).join('') + '</div>' : '') +
+      '<details class="mas-detalles"' + (otraF || otraH ? ' open' : '') + '><summary>Otra fecha' + (conHora ? ' u hora' : '') + '</summary><div class="dos-col">' +
+      campo({ n: 'OtraFecha', l: 'Fecha', t: 'date', req: true }, otraF) + (conHora ? campo({ n: 'OtraHora', l: 'Hora', t: 'time', req: true }, otraH) : '') + '</div></details>';
+  }
+  function leerCuando(d) { return { Fecha: d.OtraFecha || d.Dia || '', Hora: d.OtraHora || d.Hr || '' }; }
+
+  // Contactos para el buscador: primero los Calientes y los de actividad reciente.
+  // Se calcula una vez por cada cambio de datos.
+  function contactosOrdenados() {
+    return memo('contactos', function () {
+      var ult = {}, todos = [];
+      T('Citas').concat(T('Llamadas')).forEach(function (x) {
+        var k = x.ID_Contacto || x.ID_Interesado, f = String(x.FechaRegistro || '');
+        if (k && f > (ult[k] || '')) ult[k] = f;
+      });
+      ['interesado', 'propietario', 'otro'].forEach(function (t) {
+        T(TABLA_DE[t]).forEach(function (c) {
+          todos.push({ t: t, c: c, f: ult[c.ID] || String(c.FechaRegistro || ''), hot: t === 'interesado' && temperatura(c) === 'Caliente' && enSeguimiento(c), txt: normalizar(c.Nombre) + ' ' + soloDigitos(c.Celular) });
+        });
+      });
+      return todos.sort(function (a, b) { return b.f.localeCompare(a.f); });
+    });
+  }
+  // Buscador de contactos: filtra mientras se escribe (sin ir al servidor) y crea uno nuevo en línea.
+  // "tipos": qué contactos se pueden elegir. alElegir({tipo, id}) o null al cambiar.
+  function selectorContacto(cont, tipos, elegido, alElegir) {
+    function cuerpo(x) {
+      return '<span class="avatar ' + x.t + '">' + esc(iniciales(x.c.Nombre)) + '</span><span class="item-cuerpo"><span class="item-titulo">' + esc(x.c.Nombre) +
+        (x.t === 'interesado' ? ' ' + tagTemp(x.c) : '') + '</span><span class="item-sub">' + (x.t === 'interesado' ? 'Cliente' : NOMBRE_TIPO[x.t]) + (x.c.Celular ? ' · ' + esc(fmtCel(x.c.Celular)) : '') + '</span></span>';
+    }
+    function fila(x, i) { return '<button type="button" class="item" data-i="' + i + '">' + cuerpo(x) + '</button>'; }
+    function pintarElegido() {
+      var ct = contacto(elegido.tipo, elegido.id);
+      cont.innerHTML = '<div class="item elegido">' + cuerpo({ t: elegido.tipo, c: ct || { Nombre: 'Contacto' } }) + '<button type="button" class="enlace" data-cambiar>Cambiar</button></div>';
+      cont.querySelector('[data-cambiar]').onclick = function () { elegido = null; alElegir(null); pintarBuscador(); cont.querySelector('input').focus(); };
+    }
+    function pintarBuscador() {
+      cont.innerHTML = '<div class="caja-busqueda">' + ic('buscar', 20) + '<input type="search" placeholder="Escribe un nombre o celular" aria-label="Buscar contacto" autocomplete="off"></div><div class="lista resultados" aria-live="polite"></div>';
+      var inp = cont.querySelector('input'), res = cont.querySelector('.resultados');
+      function filtrar() {
+        var q = normalizar(inp.value.trim()), dig = soloDigitos(q), arr = contactosOrdenados().filter(function (x) { return tipos.indexOf(x.t) >= 0; });
+        var ver = q ? arr.filter(function (x) { return x.txt.indexOf(q) >= 0 || (dig.length > 2 && x.txt.indexOf(dig) >= 0); }).sort(function (a, b) { return b.hot - a.hot; }).slice(0, 8)
+          : arr.slice(0, 4).concat(arr.filter(function (x) { return x.hot; })).filter(function (x, i, a) { return a.indexOf(x) === i; }).slice(0, 6);
+        res.innerHTML = ver.map(fila).join('') + '<button type="button" class="item nuevo" data-nuevo>' + ic('mas', 20) + (q ? 'Nuevo contacto: “' + esc(inp.value.trim()) + '”' : 'Nuevo contacto') + '</button>';
+        res.querySelectorAll('[data-i]').forEach(function (b) { b.onclick = function () { elegir({ tipo: ver[b.dataset.i].t, id: ver[b.dataset.i].c.ID }); }; });
+        res.querySelector('[data-nuevo]').onclick = function () { pintarNuevo(inp.value.trim()); };
+      }
+      inp.oninput = filtrar;
+      filtrar();
+    }
+    function pintarNuevo(nombre) {
+      cont.innerHTML = '<div class="recuadro neutro"><span class="recuadro-titulo">Nuevo contacto</span>' + campo({ n: 'NNombre', l: 'Nombre', req: true }, /\d{5}/.test(nombre) ? '' : nombre) +
+        campo({ n: 'NCelular', l: 'Celular', t: 'tel', ph: '987 654 321' }, /\d{5}/.test(nombre) ? nombre : '') +
+        (tipos.length > 1 ? campo({ n: 'NTipo', l: 'Es', t: 'seg', req: true, op: tipos.map(function (t) { return [t, t === 'interesado' ? 'Cliente' : NOMBRE_TIPO[t]]; }) }, tipos[0]) : '') +
+        '<div class="fila-btns"><button type="button" class="btn primario" data-usar>Usar este contacto</button><button type="button" class="btn" data-volver-buscar>Cancelar</button></div></div>';
+      var n = cont.querySelector('#f_NNombre');
+      (n.value ? cont.querySelector('#f_NCelular') : n).focus();
+      cont.querySelector('[data-volver-buscar]').onclick = pintarBuscador;
+      cont.querySelector('[data-usar]').onclick = function () {
+        if (!n.value.trim()) { n.focus(); return toast('Escribe el nombre del contacto.'); }
+        var r = cont.querySelector('[name=NTipo]:checked'), t = r ? r.value : tipos[0];
+        var datos = { Nombre: n.value.trim(), Celular: soloDigitos(cont.querySelector('#f_NCelular').value) };
+        if (t !== 'otro') datos.Origen = 'Agente';
+        elegir({ tipo: t, id: guardarRegistro(TABLA_DE[t], datos) });
+      };
+    }
+    function elegir(x) { elegido = x; alElegir(x); pintarElegido(); }
+    if (elegido) pintarElegido(); else pintarBuscador();
   }
 
   /* ================= Vistas públicas ================= */
@@ -640,7 +1038,7 @@
         '<div class="acciones-pub"><a class="accion-pub" href="#/busco"><span class="accion-texto"><strong>Cuéntanos qué buscas</strong><span>Te recomendamos opciones al instante</span></span>' + ic('flecha', 20) + '</a>' +
         '<a class="accion-pub" href="#/publicar"><span class="accion-texto"><strong>Publica tu propiedad gratis</strong><span>Para propietarios</span></span>' + ic('flecha', 20) + '</a></div></header>' +
         avisoDemo() +
-        '<div class="seccion"><div class="seccion-cab"><h2>Nuestras propiedades</h2></div>' +
+        cabSeccion('Nuestras propiedades') +
         '<div class="chips" role="group" aria-label="Disponibilidad">' + [['', 'Todas'], ['Disponible', 'Disponibles'], ['Reservado', 'Reservadas']].map(function (o) {
           return '<button class="chip' + (f.estado === o[0] ? ' activo' : '') + '" data-est="' + o[0] + '">' + o[1] + '</button>';
         }).join('') + '</div>' +
@@ -790,6 +1188,7 @@
 
   /* ================= Vistas del agente ================= */
 
+  var ETIQUETA_TIPO = { interesado: 'Cliente', propietario: 'Propietario', otro: 'Otro' };
   function tagCita(c) {
     var tc = tipoDeCita(c);
     return '<span class="tag-cita ' + (CLASE_CITA[tc] || 'visita') + '">' + esc(tc) + '</span>';
@@ -809,25 +1208,39 @@
     };
   }
   var MARCA_FALTA = '<span class="falta-resultado">Falta resultado</span>';
-
-  // modo: '' muestra la hora a la izquierda (agenda del día), 'fecha' agrega el día, 'contacto' pone la fecha como título.
-  function itemCita(c, modo) {
-    var x = partesCita(c), k = x.k, ct = x.ct;
-    var tc = tipoDeCita(c), tel = ct && telLink(ct.Celular);
-    var sub = propDeCita(c);
-    if (tc === 'Reunión' && modo !== 'contacto') sub = NOMBRE_TIPO[k.tipo] + (k.tipo === 'otro' && ct && ct.Categoria ? ' (' + ct.Categoria + ')' : '') + ' · ' + sub;
-    if (modo === 'fecha') sub = x.cuando + ' · ' + sub;
-    return '<div class="item"><a href="#/a/cita/' + esc(c.ID) + '" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;text-decoration:none;color:inherit">' +
-      (modo ? '' : '<span class="hora">' + esc(c.Hora || '—') + '</span>') + '<div class="item-cuerpo"><div class="item-titulo">' + (modo === 'contacto' ? esc(x.cuando) : esc(x.nombre) + x.temp) + ' ' + tagCita(c) + tagAgente(c) +
-      (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado chico ' + esc(c.Estado) + '">' + esc(c.Estado) + '</span>' : '') + '</div><div class="item-sub">' + (faltaResultado(c) ? MARCA_FALTA + ' · ' : '') + esc(sub) + '</div></div></a>' +
-      (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar a ' + esc(ct.Nombre) + '">' + ic('tel', 20) + '</a>' : '') + '</div>';
+  function busca(i) { return [i.Tipo, lista(i.Zonas).join(', '), i.PresupuestoMax ? 'hasta ' + dinero(i.PresupuestoMax) : ''].filter(Boolean).join(' · ') || 'sin detalles'; }
+  function botonTel(ct, extra) {
+    var t = ct && telLink(ct.Celular);
+    return t ? '<a class="btn-icono" href="' + t + '" aria-label="Llamar a ' + esc(ct.Nombre) + '"' + (extra || '') + '>' + ic('tel', 20) + '</a>' : '';
+  }
+  function botonWsp(ct, msg, extra) {
+    var w = ct && wspLink(ct.Celular, msg);
+    return w ? '<a class="btn-icono wsp" href="' + esc(w) + '" target="_blank" rel="noopener" aria-label="WhatsApp a ' + esc(ct.Nombre) + '"' + (extra || '') + '>' + ic('wsp', 20) + '</a>' : '';
+  }
+  function cabSeccion(titulo, extra, attrs) { return '<div class="seccion"' + (attrs || '') + '><div class="seccion-cab"><h2>' + titulo + '</h2>' + (extra || '') + '</div>'; }
+  function volver(destino) { if (history.length > 1) history.back(); else ir(destino || '#/a/inicio'); }
+  // Listas largas: los primeros 20 y "Ver más".
+  function paginar(k, arr, item) {
+    var n = S.lim[k] || 20;
+    return arr.slice(0, n).map(item).join('') + (arr.length > n ? '<button type="button" class="item ver-mas" data-a="mas" data-k="' + k + '">Ver más (' + (arr.length - n) + ')</button>' : '');
   }
 
-  // Inicio > ¿Cómo te fue?: toda la fila abre la pantalla para cerrar la cita.
-  function itemPorCerrar(c) {
-    var x = partesCita(c);
-    return '<a class="item" href="#/a/como-te-fue/' + esc(c.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(x.nombre) + x.temp + ' ' + tagCita(c) + tagAgente(c) + '</div>' +
-      '<div class="item-sub">' + esc(x.cuando + ' · ' + propDeCita(c)) + '</div></div><span class="btn chico pildora">¿Cómo te fue?</span></a>';
+  // modo: '' agenda del día (hora a la izquierda), 'fecha' agrega el día, 'contacto' pone la fecha como título
+  // y 'dia' (Mi día) agrega los botones para anotar cómo te fue cuando la cita ya pasó.
+  function itemCita(c, modo) {
+    var x = partesCita(c), k = x.k, ct = x.ct, dia = modo === 'dia', cerrar = dia && porCerrar(c);
+    var sub = propDeCita(c);
+    if (tipoDeCita(c) === 'Reunión' && modo !== 'contacto') sub = ETIQUETA_TIPO[k.tipo] + (k.tipo === 'otro' && ct && ct.Categoria ? ' (' + ct.Categoria + ')' : '') + ' · ' + sub;
+    if (modo === 'fecha' || (dia && c.Fecha !== hoy())) sub = (dia ? fechaCorta(c.Fecha) : x.cuando) + ' · ' + sub;
+    var nombre = modo === 'contacto' ? esc(x.cuando) : esc(x.nombre);
+    var cuerpo = (modo && !dia ? '' : '<span class="hora">' + esc(c.Hora || '—') + '</span>') + '<div class="item-cuerpo"><div class="item-titulo">' +
+      (dia ? '<a href="#/a/cita/' + esc(c.ID) + '">' + nombre + '</a>' + (k.tipo === 'interesado' && ct ? ' ' + tagTemp(ct, true) : '') : nombre + x.temp) + ' ' + tagCita(c) + tagAgente(c) +
+      (c.Estado && c.Estado !== 'Pendiente' ? ' <span class="estado chico ' + esc(c.Estado) + '">' + esc(c.Estado) + '</span>' : '') + '</div>' +
+      '<div class="item-sub">' + (faltaResultado(c) && !cerrar ? MARCA_FALTA + ' · ' : '') + esc(sub) + '</div></div>';
+    var id = ' data-id="' + esc(c.ID) + '"';
+    return '<div class="item' + (cerrar ? ' con-acciones' : '') + '">' + (dia ? cuerpo : '<a class="item-enlace" href="#/a/cita/' + esc(c.ID) + '">' + cuerpo + '</a>') + botonTel(ct) +
+      (cerrar ? '<div class="acciones-cita"><button type="button" class="btn chico" data-a="ok"' + id + '>✅ Se realizó</button><button type="button" class="btn chico" data-a="reprog"' + id + '>🔄 Reprogramar</button>' +
+        '<button type="button" class="btn chico" data-a="falto"' + id + '>❌ No asistió</button></div>' : '') + '</div>';
   }
 
   // Historial del interesado: cada cita con su estado y lo que se anotó en Resultado.
@@ -855,25 +1268,12 @@
   }
 
   function itemLlamada(l) {
-    var tipo = tipoDeLlamada(l), ct = contacto(tipo, l.ID_Contacto);
-    var etiqueta = NOMBRE_TIPO[tipo] + (tipo === 'otro' && ct && ct.Categoria ? ' · ' + ct.Categoria : '');
-    var hecha = l.Estado === 'Hecha';
-    var tel = ct && telLink(ct.Celular);
-    var cuando = l.Fecha && l.Fecha !== hoy() ? fechaCorta(l.Fecha) + ' · ' : '';
-    return '<div class="item' + (hecha ? ' tachado' : '') + '"><button class="check' + (hecha ? ' hecho' : '') + '" data-hecha="' + esc(l.ID) + '" aria-label="' + (hecha ? 'Marcar como pendiente' : 'Marcar como hecha') + '"><span>' + (hecha ? ic('check', 16) : '') + '</span></button>' +
-      '<a href="#/a/llamada/' + esc(l.ID) + '" class="item-cuerpo" style="text-decoration:none;color:inherit"><div class="item-titulo">' + esc(ct ? ct.Nombre : 'Contacto eliminado') + ' <span class="tag ' + tipo + '">' + esc(etiqueta) + '</span>' + tagAgente(l) + '</div>' +
-      '<div class="item-sub">' + esc(cuando + (l.Motivo || 'Sin motivo')) + '</div></a>' +
-      (tel ? '<a class="btn-icono" href="' + tel + '" aria-label="Llamar">' + ic('tel', 20) + '</a>' : '') + '</div>';
-  }
-  function enlazarChecks(app, rehacer) {
-    app.querySelectorAll('[data-hecha]').forEach(function (b) {
-      b.onclick = function () {
-        var l = buscarId('Llamadas', b.dataset.hecha);
-        if (!l) return;
-        var nuevo = Object.assign({}, l, { Estado: l.Estado === 'Hecha' ? 'Pendiente' : 'Hecha' });
-        guardarRegistro('Llamadas', nuevo).then(function () { toast(nuevo.Estado === 'Hecha' ? 'Llamada hecha' : 'Llamada pendiente'); rehacer(); });
-      };
-    });
+    var tipo = tipoDeLlamada(l), ct = contacto(tipo, l.ID_Contacto), hecha = l.Estado === 'Hecha', atrasada = !hecha && l.Fecha && l.Fecha < hoy();
+    var etiqueta = ETIQUETA_TIPO[tipo] + (tipo === 'otro' && ct && ct.Categoria ? ' · ' + ct.Categoria : '');
+    var cuando = l.Fecha && l.Fecha !== hoy() ? (atrasada ? 'Atrasada · ' : '') + fechaCorta(l.Fecha) + ' · ' : '';
+    return '<div class="item' + (hecha ? ' tachado' : '') + '"><button class="check' + (hecha ? ' hecho' : '') + '" data-a="hecha" data-id="' + esc(l.ID) + '" aria-label="' + (hecha ? 'Marcar como pendiente' : 'Marcar como hecha') + '"><span>' + (hecha ? ic('check', 16) : '') + '</span></button>' +
+      '<a href="#/a/llamada/' + esc(l.ID) + '" class="item-enlace"><div class="item-cuerpo"><div class="item-titulo">' + esc(ct ? ct.Nombre : 'Contacto eliminado') + ' <span class="tag ' + tipo + '">' + esc(etiqueta) + '</span>' + tagAgente(l) + '</div>' +
+      '<div class="item-sub' + (atrasada ? ' alerta-texto' : '') + '">' + esc(cuando + (l.Motivo || 'Sin motivo')) + '</div></div></a>' + botonTel(ct) + '</div>';
   }
 
   // Inicio > Sin asignar (solo administrador): lo que llegó desde la app pública.
@@ -886,53 +1286,76 @@
       '<a class="btn chico pildora" href="#/a/asignar/' + TABLA_DE[tipo] + '/' + esc(c.ID) + '">Asignar a…</a></div>';
   }
 
+  /* ---------- Mi día ---------- */
+
+  // Las secciones de Inicio se calculan una vez por cada cambio de datos (o por minuto).
+  function miDia() {
+    return memo('dia' + S.filtroAgente, function () {
+      var h = hoy(), pend = delAgente(llamadasPendientes()), citas = delAgente(T('Citas')), ints = delAgente(T('Interesados')), ocupado = {};
+      citas.forEach(function (c) { if (citaPendiente(c)) ocupado[contactoDeCita(c).id] = 1; });
+      pend.forEach(function (l) { ocupado[l.ID_Contacto] = 1; });
+      var espera = ints.filter(function (i) { return estadoSeg(i) === 'En espera'; }).map(function (i) { return { i: i, nuevas: nuevasOpciones(i) }; })
+        .sort(function (a, b) { return (b.nuevas.length > 0) - (a.nuevas.length > 0) || RANGO_TEMP[temperatura(a.i)] - RANGO_TEMP[temperatura(b.i)]; });
+      return {
+        citas: citas.filter(function (c) { return c.Fecha === h || (c.Fecha < h && porCerrar(c)); }).sort(ordenarCitas),
+        hoyN: citas.filter(function (c) { return c.Fecha === h && c.Estado !== 'Cancelada'; }).length,
+        llamadas: pend.filter(function (l) { return !l.Fecha || l.Fecha <= h; }).sort(function (a, b) { return (a.Fecha || '9').localeCompare(b.Fecha || '9'); }),
+        espera: espera,
+        nuevas: espera.filter(function (x) { return x.nuevas.length; }).length,
+        sinSeg: ints.filter(function (i) { return estadoSeg(i) === 'Activo' && temperatura(i) !== 'Frío' && !ocupado[i.ID]; })
+          .sort(function (a, b) { return RANGO_TEMP[temperatura(a)] - RANGO_TEMP[temperatura(b)]; })
+      };
+    });
+  }
+  // Muestra hasta 5 y "Ver todo". Si no hay nada, un mensaje breve en vez de ocultarla.
+  function seccionDia(k, titulo, arr, item, vacio) {
+    var ver = S.lim[k] || 5;
+    return cabSeccion(titulo + (arr.length ? ' <span class="cuenta">' + arr.length + '</span>' : ''), arr.length > ver ? '<button type="button" class="ver-todo" data-a="mas" data-k="' + k + '" data-paso="1000">Ver todo</button>' : '') +
+      (arr.length ? '<div class="lista">' + arr.slice(0, ver).map(item).join('') + '</div>' : '<p class="vacio ok">' + vacio + '</p>') + '</div>';
+  }
+  function itemEspera(x) {
+    var i = x.i, p = x.nuevas[0];
+    var msg = p ? 'Hola ' + nombreCorto(i.Nombre) + ', te escribo de ' + marca(conf()) + '. Tengo una nueva opción que puede interesarte: ' + resumenProp(p) + (p.Precio ? ' a ' + dinero(p.Precio) : '') + '. ¿Te gustaría verla?' : '';
+    var marcar = p ? ' data-a="avisada" data-id="' + esc(i.ID) + '" data-p="' + esc(ids(x.nuevas)) + '"' : '';
+    return '<div class="item"><div class="item-cuerpo"><div class="item-titulo"><a href="#/a/contacto/interesado/' + esc(i.ID) + '">' + esc(i.Nombre) + '</a> ' + tagTemp(i, true) +
+      (p ? ' <span class="tag-nueva">¡Nueva opción!</span>' : '') + tagAgente(i) + '</div><div class="item-sub">' +
+      (p ? '<a href="#/a/propiedad/' + esc(p.ID) + '">' + esc(resumenProp(p)) + '</a>' + (p.Precio ? ' · ' + dinero(p.Precio) : '') + (x.nuevas.length > 1 ? ' y ' + (x.nuevas.length - 1) + ' más' : '') : 'Busca: ' + esc(busca(i))) +
+      '</div></div>' + botonTel(i, marcar) + (p ? botonWsp(i, msg, marcar) : '') + '</div>';
+  }
+  function itemSinSeg(i) {
+    return '<div class="item con-acciones"><div class="item-cuerpo"><div class="item-titulo"><a href="#/a/contacto/interesado/' + esc(i.ID) + '">' + esc(i.Nombre) + '</a> ' + tagTemp(i, true) + tagAgente(i) + '</div>' +
+      '<div class="item-sub">' + esc(i.DetalleInteres || 'Busca: ' + busca(i)) + '</div></div>' + botonTel(i) +
+      '<a class="btn chico pildora abajo" href="#/a/llamada-nueva?tipo=interesado&id=' + esc(i.ID) + '&motivo=Seguimiento">' + ic('llamadas', 18) + 'Programar seguimiento</a></div>';
+  }
+
   VISTAS.inicio = function () {
-    var h = hoy(), admin = esAdmin();
-    var citasHoy = citasActivas().filter(function (c) { return c.Fecha === h; }).sort(ordenarCitas);
-    var pend = llamadasPendientes().filter(function (l) { return !l.Fecha || l.Fecha <= h; }).sort(function (a, b) { return (a.Fecha || '').localeCompare(b.Fecha || ''); });
-    var porAprobar = T('Propiedades').filter(function (p) { return p.Estado === 'Pendiente' && p.ID_Agente; });
-    var en3 = sumarDias(h, 3);
-    var porVencer = T('Reservas').filter(function (r) { return r.Estado === 'Activa' && esIso(r.FechaLimite) && r.FechaLimite <= en3; })
+    var h = hoy(), admin = esAdmin(), d = miDia(), en3 = sumarDias(h, 3), hace7 = sumarDias(h, -7);
+    var porVencer = delAgente(T('Reservas')).filter(function (r) { return r.Estado === 'Activa' && esIso(r.FechaLimite) && r.FechaLimite <= en3; })
       .sort(function (a, b) { return a.FechaLimite.localeCompare(b.FechaLimite); });
-    var cerrar = T('Citas').filter(porCerrar).sort(ordenarCitas).reverse();
-    var cerrarVer = S.verPorCerrar ? cerrar : cerrar.slice(0, 5);
-    var hace7 = sumarDias(h, -7);
-    var nuevosInt = T('Interesados').filter(function (i) { return i.Origen === 'App' && i.ID_Agente && String(i.FechaRegistro).slice(0, 10) >= hace7; });
+    var nuevos = T('Propiedades').filter(function (p) { return p.Estado === 'Pendiente' && p.ID_Agente; }).map(function (p) {
+      var dueno = buscarId('Propietarios', p.ID_Propietario);
+      return '<a class="item" href="#/a/propiedad/' + esc(p.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(resumenProp(p)) + ' <span class="tag app">Por aprobar</span>' + tagAgente(p) + '</div><div class="item-sub">Enviada por ' + esc(dueno ? dueno.Nombre : 'propietario') + '</div></div></a>';
+    }).concat(T('Interesados').filter(function (i) { return i.Origen === 'App' && i.ID_Agente && String(i.FechaRegistro).slice(0, 10) >= hace7; }).map(function (i) {
+      return '<a class="item" href="#/a/contacto/interesado/' + esc(i.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(i.Nombre) + ' <span class="tag interesado">Nuevo cliente</span>' + tagAgente(i) + '</div><div class="item-sub">Busca: ' + esc(busca(i)) + '</div></div></a>';
+    }));
     var sinAsignar = !admin ? [] : T('Propietarios').filter(function (c) { return !c.ID_Agente; }).map(function (c) { return itemSinAsignar('propietario', c); })
       .concat(T('Interesados').filter(function (c) { return !c.ID_Agente; }).map(function (c) { return itemSinAsignar('interesado', c); }));
-    var nuevos = porAprobar.map(function (p) {
-      var dueno = buscarId('Propietarios', p.ID_Propietario);
-      return '<a class="item" href="#/a/propiedad/' + esc(p.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(resumenProp(p)) + ' <span class="tag app">Por aprobar</span></div><div class="item-sub">Enviada por ' + esc(dueno ? dueno.Nombre : 'propietario') + '</div></div></a>';
-    }).concat(nuevosInt.map(function (i) {
-      return '<a class="item" href="#/a/contacto/interesado/' + esc(i.ID) + '"><div class="item-cuerpo"><div class="item-titulo">' + esc(i.Nombre) + ' <span class="tag interesado">Nuevo interesado</span></div><div class="item-sub">Busca: ' + esc([i.Tipo, lista(i.Zonas).join(', ')].filter(Boolean).join(' · ') || 'sin detalles') + '</div></div></a>';
-    }));
-    pintar('<div class="pantalla"><div class="cab"><div><p class="fecha-hoy">' + fechaLarga(h) + '</p><p class="saludo">' + saludo() + (S.agente && S.agente.Nombre ? ', ' + esc(S.agente.Nombre.split(' ')[0]) : '') + '</p></div>' +
-      '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a></div>' + avisoDemo() +
-      '<div class="metricas"><a class="metrica" href="#/a/citas"><span>Citas hoy</span><strong>' + citasHoy.length + '</strong></a>' +
-      '<a class="metrica naranja" href="#/a/llamadas"><span>Llamadas pendientes</span><strong>' + pend.length + '</strong></a></div>' +
-      (cerrar.length ? '<div class="seccion"><div class="seccion-cab"><h2>¿Cómo te fue?</h2>' +
-        (cerrar.length > 5 ? '<button class="ver-todo" data-ver-cerrar>' + (S.verPorCerrar ? 'Ver menos' : 'Ver todas (' + cerrar.length + ')') + '</button>' : '') + '</div>' +
-        '<p class="item-sub">Citas que ya pasaron y siguen pendientes. Anota cómo te fue.</p><div class="lista">' + cerrarVer.map(itemPorCerrar).join('') + '</div></div>' : '') +
-      (sinAsignar.length ? '<div class="seccion"><div class="seccion-cab"><h2>Sin asignar</h2></div><p class="item-sub">Llegaron desde la app pública. Elige qué agente los atiende; los agentes no los ven hasta que los asignes.</p>' +
+    var menu = (admin ? [['Agentes', '#/a/agentes']] : []).concat([['Todas las llamadas', '#/a/llamadas'],
+      ['Ver el catálogo público', function () { S.pub = null; location.hash = '#/catalogo'; }], ['Cambiar contraseña', '#/a/cambiar-contrasena'],
+      ['Actualizar datos', function () { S.pub = null; cargarDb(true); toast('Actualizando…'); }],
+      ['Cerrar sesión', function () { if (confirm('¿Cerrar sesión en este celular?')) salirAgente(); }, 'peligro']]);
+    function extra(titulo, items) { return items.length ? cabSeccion(titulo) + '<div class="lista">' + items.join('') + '</div></div>' : ''; }
+    pintar('<div class="pantalla"><div class="cab"><div><p class="fecha-hoy">' + fechaLarga(h) + '</p><h1 class="saludo">' + saludo() + (S.agente && S.agente.Nombre ? ', ' + esc(nombreCorto(S.agente.Nombre)) : '') + '</h1></div>' + botonMenu(menu) + '</div>' +
+      avisoDemo() + filtroAgente() +
+      '<p class="resumen-dia">Hoy: <strong>' + plural(d.hoyN, 'cita', 'citas') + '</strong> · <strong>' + plural(d.llamadas.length, 'llamada', 'llamadas') + '</strong> · <strong>' + plural(d.nuevas, 'nueva opción', 'nuevas opciones') + '</strong></p>' +
+      seccionDia('dc', 'Citas de hoy', d.citas, function (c) { return itemCita(c, 'dia'); }, 'No tienes citas hoy. ¡Buen momento para llamar a tus clientes!') +
+      seccionDia('ds', 'Seguimientos de hoy', d.llamadas, itemLlamada, 'Todo al día: no tienes llamadas pendientes.') +
+      seccionDia('de', 'Clientes en espera', d.espera, itemEspera, 'Nadie en espera. Si un cliente busca algo que aún no tienes, toca “' + AVISO + '”.') +
+      seccionDia('dn', 'Sin seguimiento', d.sinSeg, itemSinSeg, 'Todos tus clientes calientes y tibios tienen una cita o llamada pendiente.') +
+      extra('Reservas por vencer', porVencer.map(function (r) { return itemReserva(r, 'inicio'); })) + extra('Nuevos desde la app', nuevos) +
+      (sinAsignar.length ? cabSeccion('Sin asignar') + '<p class="item-sub">Llegaron desde la app pública. Elige qué agente los atiende; los agentes no los ven hasta que los asignes.</p>' +
         '<div class="lista">' + sinAsignar.join('') + '</div></div>' : '') +
-      (nuevos.length ? '<div class="seccion"><div class="seccion-cab"><h2>Nuevos desde la app</h2></div><div class="lista">' + nuevos.join('') + '</div></div>' : '') +
-      '<div class="seccion"><div class="seccion-cab"><h2>Citas de hoy</h2><a class="ver-todo" href="#/a/citas">Ver todo</a></div>' +
-      (citasHoy.length ? '<div class="lista">' + citasHoy.map(function (c) { return itemCita(c); }).join('') + '</div>' : '<div class="vacio">No tienes citas hoy. <a href="#/a/cita-nueva">Agendar una cita</a></div>') + '</div>' +
-      (porVencer.length ? '<div class="seccion"><div class="seccion-cab"><h2>Reservas por vencer</h2></div><div class="lista">' + porVencer.map(function (r) { return itemReserva(r, 'inicio'); }).join('') + '</div></div>' : '') +
-      '<div class="seccion"><div class="seccion-cab"><h2>Llamadas pendientes</h2><a class="ver-todo" href="#/a/llamadas">Ver todo</a></div>' +
-      (pend.length ? '<div class="lista">' + pend.slice(0, 6).map(itemLlamada).join('') + '</div>' : '<div class="vacio">No tienes llamadas pendientes para hoy.</div>') + '</div>' +
-      '<div class="menu-agente">' + (admin ? '<a class="btn ancho" href="#/a/agentes">' + ic('gente', 20) + 'Agentes</a>' : '') +
-      '<a class="btn ancho" href="#/" data-catalogo>' + ic('edificio', 20) + 'Ver el catálogo público</a>' +
-      '<a class="btn ancho" href="#/a/cambiar-contrasena">' + ic('candado', 20) + 'Cambiar contraseña</a>' +
-      '<div class="fila-btns"><button class="btn chico" data-recargar>' + ic('recargar', 18) + 'Actualizar datos</button><button class="btn chico peligro" data-salir>' + ic('salir', 18) + 'Cerrar sesión</button></div></div>' +
-      '</div>' + nav('inicio'), function (app) {
-        enlazarChecks(app, VISTAS.inicio);
-        var vc = app.querySelector('[data-ver-cerrar]');
-        if (vc) vc.onclick = function () { S.verPorCerrar = !S.verPorCerrar; VISTAS.inicio(); };
-        app.querySelector('[data-catalogo]').onclick = function (e) { e.preventDefault(); S.pub = null; location.hash = '#/catalogo'; };
-        app.querySelector('[data-recargar]').onclick = function () { S.pub = null; cargarDb(true); toast('Actualizando…'); };
-        app.querySelector('[data-salir]').onclick = function () { if (confirm('¿Cerrar sesión en este celular?')) salirAgente(); };
-      });
+      '</div>' + nav('inicio'), function (app) { enlazarFiltroAgente(app, VISTAS.inicio); });
   };
 
   VISTAS['cambiar-contrasena'] = function () {
@@ -991,141 +1414,189 @@
       g[1].sort(function (a, b) { return (a.Fecha || '').localeCompare(b.Fecha || ''); });
       return '<div class="seccion"><div class="seccion-cab"><h2' + (g[2] ? ' class="alerta"' : '') + '>' + g[0] + '</h2></div><div class="lista">' + g[1].map(itemLlamada).join('') + '</div></div>';
     }).join('');
-    pintar('<div class="pantalla">' + cabVolver('Llamadas', '<a class="btn-redondo" href="#/a/llamada-nueva" aria-label="Nueva llamada">' + ic('mas', 26) + '</a>') + filtroAgente() +
-      (cuerpo || '<div class="vacio">No tienes llamadas pendientes. Toca + para programar una.</div>') +
+    pintar('<div class="pantalla">' + cabVolver('Llamadas') + filtroAgente() +
+      (cuerpo || '<div class="vacio ok">Todo al día: no tienes llamadas pendientes.</div>') +
       (hechas.length ? '<button class="btn ancho" data-hechas>' + (S.verHechas ? 'Ocultar hechas' : 'Ver hechas (' + hechas.length + ')') + '</button>' +
-        (S.verHechas ? '<div class="lista">' + hechas.map(itemLlamada).join('') + '</div>' : '') : '') +
+        (S.verHechas ? '<div class="lista">' + paginar('lh', hechas, itemLlamada) + '</div>' : '') : '') +
       '</div>' + nav('inicio'), function (app) {
         enlazarVolver(app);
-        enlazarChecks(app, VISTAS.llamadas);
         enlazarFiltroAgente(app, VISTAS.llamadas);
         var b = app.querySelector('[data-hechas]');
         if (b) b.onclick = function () { S.verHechas = !S.verHechas; VISTAS.llamadas(); };
       });
   };
 
+  /* ---------- Contactos ---------- */
+
+  var FILTROS_CLIENTE = [['', 'En seguimiento'], ['Caliente', '🔥 Caliente'], ['Tibio', '🌤️ Tibio'], ['Frío', '❄️ Frío'], ['En espera', 'En espera'], ['Compró', 'Compró'], ['Descartado', 'Descartado']];
+  function pasaFiltro(c, f) { return ESTADOS_SEG.indexOf(f) > 0 ? estadoSeg(c) === f : enSeguimiento(c) && (!f || temperatura(c) === f); }
+  function itemContacto(tab) {
+    return function (c) {
+      var extra = tab === 'interesado' ? 'Busca: ' + busca(c) : (tab === 'propietario' ? plural(T('Propiedades').filter(function (x) { return x.ID_Propietario === c.ID; }).length, 'propiedad', 'propiedades') : [c.Categoria, c.Detalle].filter(Boolean).join(' · '));
+      return '<div class="item"><a class="item-enlace" href="#/a/contacto/' + tab + '/' + esc(c.ID) + '"><span class="avatar ' + tab + '">' + esc(iniciales(c.Nombre)) + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(c.Nombre) +
+        (tab === 'interesado' ? tagSeg(c) : '') + (c.Origen === 'App' ? ' <span class="tag app">App</span>' : '') + tagAgente(c) + '</div><div class="item-sub">' + esc((c.Celular ? fmtCel(c.Celular) : 'Sin celular') + (extra ? ' · ' + extra : '')) + '</div></div></a>' +
+        (tab === 'interesado' ? tagTemp(c, true) : '') + '</div>';
+    };
+  }
   VISTAS.contactos = function (p, q) {
     if (q.tab) S.tabContactos = q.tab;
-    var tab = S.tabContactos, qq = S.qContactos.toLowerCase();
-    var ft = tab === 'interesado' ? S.filtroTemp : '';
-    var filas = delAgente(T(TABLA_DE[tab])).filter(function (c) {
-      if (ft && temperatura(c) !== ft) return false;
-      return !qq || (c.Nombre + ' ' + c.Celular + ' ' + (c.Categoria || '')).toLowerCase().indexOf(qq) >= 0;
-    }).sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
-    var html = filas.map(function (c) {
-      var sub = c.Celular || 'Sin celular';
-      var extra = '';
-      if (tab === 'interesado') extra = 'Busca: ' + ([c.Tipo, c.PresupuestoMax ? 'hasta ' + dinero(c.PresupuestoMax) : ''].filter(Boolean).join(' · ') || 'sin detalles');
-      if (tab === 'propietario') {
-        var n = T('Propiedades').filter(function (x) { return x.ID_Propietario === c.ID; }).length;
-        extra = n + (n === 1 ? ' propiedad' : ' propiedades');
-      }
-      if (tab === 'otro') extra = [c.Categoria, c.Detalle].filter(Boolean).join(' · ');
-      return '<a class="item" href="#/a/contacto/' + tab + '/' + esc(c.ID) + '"><span class="avatar ' + tab + '">' + esc(iniciales(c.Nombre)) + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(c.Nombre) +
-        (tab === 'interesado' ? ' ' + tagTemp(c) : '') + (c.Origen === 'App' ? ' <span class="tag app">App</span>' : '') + tagAgente(c) + '</div><div class="item-sub">' + esc(sub) + '</div>' + (extra ? '<div class="item-sub">' + esc(extra) + '</div>' : '') + '</div></a>';
-    }).join('');
-    pintar('<div class="pantalla"><div class="cab"><h1>Contactos</h1><a class="btn-redondo" href="#/a/contacto-form/' + tab + '" aria-label="Registrar contacto">' + ic('mas', 26) + '</a></div>' +
+    if ('f' in q) S.filtroTemp = q.f;
+    var tab = S.tabContactos;
+    pintar('<div class="pantalla"><div class="cab"><h1>Contactos</h1></div>' +
       '<div class="pestanas" role="tablist">' + ['interesado', 'propietario', 'otro'].map(function (t) {
-        return '<button role="tab" aria-selected="' + (t === tab) + '" class="' + (t === tab ? 'activo' : '') + '" data-tab="' + t + '">' + { interesado: 'Interesados', propietario: 'Propietarios', otro: 'Otros' }[t] + '</button>';
+        return '<button role="tab" aria-selected="' + (t === tab) + '" class="' + (t === tab ? 'activo' : '') + '" data-tab="' + t + '">' + { interesado: 'Clientes', propietario: 'Propietarios', otro: 'Otros' }[t] + '</button>';
       }).join('') + '</div>' + filtroAgente() +
       '<div class="caja-busqueda">' + ic('buscar', 20) + '<input id="qc" type="search" placeholder="Buscar por nombre o celular" aria-label="Buscar contacto" value="' + esc(S.qContactos) + '"></div>' +
-      (tab === 'interesado' ? '<div class="chips" role="group" aria-label="Nivel de interés">' + [''].concat(TEMPERATURAS.slice().reverse()).map(function (t) {
-        return '<button class="chip' + (ft === t ? ' activo' : '') + '" data-temp="' + t + '" aria-pressed="' + (ft === t) + '">' + (t ? '<span class="punto ' + CLASE_TEMP[t] + '"></span>' + t : 'Todos') + '</button>';
+      (tab === 'interesado' ? '<div class="chips" role="group" aria-label="Filtrar clientes">' + FILTROS_CLIENTE.map(function (f) {
+        return '<button class="chip' + (S.filtroTemp === f[0] ? ' activo' : '') + '" data-f="' + f[0] + '" aria-pressed="' + (S.filtroTemp === f[0]) + '">' + f[1] + '</button>';
       }).join('') + '</div>' : '') +
-      (html ? '<div class="lista">' + html + '</div>' : '<div class="vacio">' + (qq ? 'Sin resultados para esa búsqueda.' : (ft ? 'No hay interesados con nivel de interés ' + ft.toLowerCase() + '.' : 'Aún no tienes contactos aquí. Toca + para registrar el primero.')) + '</div>') +
-      '</div>' + nav('contactos'), function (app) {
-        app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { S.tabContactos = b.dataset.tab; VISTAS.contactos([], {}); }; });
-        app.querySelectorAll('[data-temp]').forEach(function (b) { b.onclick = function () { S.filtroTemp = b.dataset.temp; VISTAS.contactos([], {}); }; });
+      '<div id="listaC"></div></div>' + nav('contactos'), function (app) {
+        app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { S.tabContactos = b.dataset.tab; S.lim.c = 20; VISTAS.contactos([], {}); }; });
+        app.querySelectorAll('[data-f]').forEach(function (b) { b.onclick = function () { S.filtroTemp = b.dataset.f; S.lim.c = 20; VISTAS.contactos([], {}); }; });
         enlazarFiltroAgente(app, function () { VISTAS.contactos([], {}); });
-        var inp = app.querySelector('#qc');
-        inp.oninput = function () {
-          S.qContactos = inp.value; var pos = inp.selectionStart; VISTAS.contactos([], {});
-          var n = document.getElementById('qc'); n.focus(); n.setSelectionRange(pos, pos);
-        };
+        var inp = app.querySelector('#qc'), cont = app.querySelector('#listaC');
+        // Al escribir solo se vuelve a pintar la lista, con los datos que ya están en el celular.
+        function pintarLista() {
+          var qq = normalizar(S.qContactos.trim()), dig = soloDigitos(qq);
+          var filas = delAgente(T(TABLA_DE[tab])).filter(function (c) {
+            return (tab !== 'interesado' || pasaFiltro(c, S.filtroTemp)) && (!qq || normalizar(c.Nombre + ' ' + (c.Categoria || '')).indexOf(qq) >= 0 || (dig.length > 2 && soloDigitos(c.Celular).indexOf(dig) >= 0));
+          }).sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
+          cont.innerHTML = filas.length ? '<div class="lista">' + paginar('c', filas, itemContacto(tab)) + '</div>'
+            : '<div class="vacio">' + (qq ? 'Sin resultados para esa búsqueda.' : 'Aún no hay contactos aquí. Toca + para registrar el primero.') + '</div>';
+        }
+        inp.oninput = function () { S.qContactos = inp.value; S.lim.c = 20; pintarLista(); };
+        pintarLista();
       });
   };
 
-  VISTAS.contacto = function (p) {
+  // Cambiar el estado de seguimiento de un cliente.
+  function panelSeg(c) {
+    abrirMenu(ESTADOS_SEG.map(function (e) {
+      return [e + (estadoSeg(c) === e ? ' ✓' : ''), function () {
+        if (e === 'En espera') marcarEnEspera(c); else guardarRegistro('Interesados', { ID: c.ID, EstadoSeguimiento: e });
+        toast(nombreCorto(c.Nombre) + ': ' + e.toLowerCase()); render();
+      }];
+    }), '<h2 class="hoja-titulo">Seguimiento de ' + esc(nombreCorto(c.Nombre)) + '</h2>');
+  }
+
+  VISTAS.contacto = function (p, q) {
     var tipo = p[0], c = contacto(tipo, p[1]);
     if (!c) return pintar('<div class="pantalla">' + cabVolver('Contacto') + '<div class="vacio">Este contacto ya no existe.</div></div>' + nav('contactos'), function (a) { enlazarVolver(a, '#/a/contactos'); });
-    var tel = telLink(c.Celular), wsp = wspLink(c.Celular);
-    var datos = '<dt>Celular</dt><dd>' + esc(c.Celular || '—') + '</dd>';
-    var extra = '';
-    if (tipo === 'interesado') {
-      datos += '<dt>Nivel de interés</dt><dd>' + tagTemp(c) + (c.DetalleInteres ? '<br>' + esc(c.DetalleInteres) : '') + '</dd>' +
-        '<dt>Operación</dt><dd>' + esc(c.Operacion === 'Venta' ? 'Comprar' : (c.Operacion === 'Alquiler' ? 'Alquilar' : '—')) + '</dd>' +
+    var esInt = tipo === 'interesado', tel = telLink(c.Celular), wsp = wspLink(c.Celular), id = esc(c.ID);
+    var menu = [['Agendar cita', '#/a/cita-nueva?ct=' + tipo + '&id=' + c.ID], ['Programar llamada', '#/a/llamada-nueva?tipo=' + tipo + '&id=' + c.ID]];
+    if (esInt) menu.push(estadoSeg(c) === 'En espera' ? ['Cambiar seguimiento', function () { panelSeg(c); }]
+      : [AVISO + ' (dejar en espera)', function () { marcarEnEspera(c); toast(nombreCorto(c.Nombre) + ' quedó en espera. Te avisaré cuando aparezca algo.'); render(); }], ['Cambiar seguimiento', function () { panelSeg(c); }]);
+    if (tipo === 'propietario') menu.push(['Agregar propiedad', '#/a/propiedad-form?dueno=' + c.ID]);
+    menu.push(['Editar datos', '#/a/contacto-form/' + tipo + '/' + c.ID]);
+    if (esAdmin() && !c.ID_Agente && tipo !== 'otro') menu.push(['Asignar a un agente', '#/a/asignar/' + TABLA_DE[tipo] + '/' + c.ID]);
+    menu.push(['Eliminar contacto', function () {
+      if (confirm('¿Eliminar a ' + c.Nombre + '? Esta acción no se puede deshacer.')) eliminarRegistro(TABLA_DE[tipo], c.ID).then(function () { toast('Contacto eliminado'); ir('#/a/contactos'); }).catch(function () {});
+    }, 'peligro']);
+    var datos = '<dt>Celular</dt><dd>' + esc(c.Celular ? fmtCel(c.Celular) : '—') + '</dd>', extra = '';
+    if (esInt) {
+      datos += (c.DetalleInteres ? '<dt>Su interés</dt><dd>' + esc(c.DetalleInteres) + '</dd>' : '') +
+        '<dt>Quiere</dt><dd>' + esc(c.Operacion === 'Venta' ? 'Comprar' : (c.Operacion === 'Alquiler' ? 'Alquilar' : '—')) + '</dd>' +
         '<dt>Busca</dt><dd>' + esc(c.Tipo || '—') + '</dd><dt>Zonas</dt><dd>' + esc(c.Zonas || '—') + '</dd>' +
         '<dt>Presupuesto</dt><dd>' + esc(dinero(c.PresupuestoMax) || '—') + '</dd><dt>Área mínima</dt><dd>' + esc(c.AreaMin ? c.AreaMin + ' m²' : '—') + '</dd>' +
         '<dt>Dormitorios</dt><dd>' + esc(c.DormitoriosMin || '—') + '</dd><dt>Desea</dt><dd>' + esc(c.Caracteristicas || '—') + '</dd>';
-      var recos = recomendarPara(c, T('Propiedades'));
-      extra += '<div class="seccion"><div class="seccion-cab"><h2>Propiedades recomendadas</h2></div>' + (recos.length ? recos.map(function (x) {
+      var recos = recomendarPara(c, T('Propiedades').filter(function (x) { return x.ID_Agente === c.ID_Agente; }));
+      extra += cabSeccion('Propiedades recomendadas', '', ' id="recos"') + (recos.length ? paginar('r', recos, function (x) {
         return '<div class="reco"><a class="reco-cab" href="#/a/propiedad/' + esc(x.p.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(resumenProp(x.p)) + '</span><span class="precio">' + (dinero(x.p.Precio) || 'Sin precio') + '</span></div></a>' +
-          htmlRazones(x.m.razones) + '<div class="fila-btns"><a class="btn chico" href="#/a/cita-nueva?tipo=visita&ct=interesado&id=' + esc(c.ID) + '&prp=' + esc(x.p.ID) + '">' + ic('cal', 18) + 'Agendar cita</a>' +
-          '<a class="btn chico" href="#/a/reserva-nueva?prp=' + esc(x.p.ID) + '&int=' + esc(c.ID) + '">' + ic('reserva', 18) + 'Reservar</a></div></div>';
-      }).join('') : '<div class="vacio">Ninguna propiedad disponible coincide todavía.</div>') + '</div>';
+          htmlRazones(x.m.razones) + '<div class="fila-btns"><a class="btn chico" href="#/a/cita-nueva?ct=interesado&id=' + id + '&prp=' + esc(x.p.ID) + '">' + ic('cal', 18) + 'Agendar cita</a>' +
+          '<a class="btn chico" href="#/a/reserva-nueva?prp=' + esc(x.p.ID) + '&int=' + id + '">' + ic('reserva', 18) + 'Reservar</a></div></div>';
+      }) : '<div class="vacio">' + (tieneBusqueda(c) ? 'Ninguna propiedad disponible coincide todavía.' : 'Agrega qué busca para ver recomendaciones.') + '</div>') + '</div>';
     }
     if (tipo === 'propietario') {
       var props = T('Propiedades').filter(function (x) { return x.ID_Propietario === c.ID; });
-      extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus propiedades</h2><a class="ver-todo" href="#/a/propiedad-form?dueno=' + esc(c.ID) + '">+ Agregar</a></div>' +
+      extra += cabSeccion('Sus propiedades', '<a class="ver-todo" href="#/a/propiedad-form?dueno=' + id + '">+ Agregar</a>') +
         (props.length ? '<div class="lista-props">' + props.map(tarjetaAgente).join('') + '</div>' : '<div class="vacio">Sin propiedades registradas.</div>') + '</div>';
     }
     var citas = citasDe(tipo, c.ID);
-    if (tipo === 'interesado') extra += '<div class="seccion"><div class="seccion-cab"><h2>Historial</h2></div>' +
+    if (esInt) extra += cabSeccion('Historial') +
       (citas.length ? '<div class="lista">' + citas.reverse().map(itemHistorial).join('') + '</div>' : '<div class="vacio">Aún no tiene citas.</div>') + '</div>';
-    else if (citas.length) extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus citas</h2></div><div class="lista">' + citas.map(function (x) { return itemCita(x, 'contacto'); }).join('') + '</div></div>';
-    if (tipo === 'interesado') {
+    else if (citas.length) extra += cabSeccion('Sus citas') + '<div class="lista">' + citas.map(function (x) { return itemCita(x, 'contacto'); }).join('') + '</div></div>';
+    if (esInt) {
       var reservas = T('Reservas').filter(function (r) { return r.ID_Interesado === c.ID; }).sort(ordenarReservas);
-      if (reservas.length) extra += '<div class="seccion"><div class="seccion-cab"><h2>Sus reservas</h2></div><div class="lista">' + reservas.map(function (r) { return itemReserva(r, 'interesado'); }).join('') + '</div></div>';
+      if (reservas.length) extra += cabSeccion('Sus reservas') + '<div class="lista">' + reservas.map(function (r) { return itemReserva(r, 'interesado'); }).join('') + '</div></div>';
     }
-    var agendar = { interesado: ['visita', 'Agendar visita'], propietario: ['captacion', 'Agendar cita de captación'], otro: ['reunion', 'Agendar reunión'] }[tipo];
     if (tipo === 'otro') datos += '<dt>Categoría</dt><dd>' + esc(c.Categoria || '—') + '</dd><dt>Detalle</dt><dd>' + esc(c.Detalle || '—') + '</dd>';
     if (c.Notas) datos += '<dt>Notas</dt><dd>' + esc(c.Notas) + '</dd>';
     datos += '<dt>Registrado</dt><dd>' + esc(String(c.FechaRegistro || '').slice(0, 10) || '—') + (c.Origen === 'App' ? ' (desde la app)' : '') + '</dd>';
-    if (esAdmin()) datos += '<dt>Agente</dt><dd>' + esc(nombreAgente(c.ID_Agente)) + (!c.ID_Agente && tipo !== 'otro' ? '<br><a href="#/a/asignar/' + TABLA_DE[tipo] + '/' + esc(c.ID) + '">Asignar a…</a>' : '') + '</dd>';
-    pintar('<div class="pantalla">' + cabVolver(NOMBRE_TIPO[tipo], '<a class="btn-icono borde" href="#/a/contacto-form/' + tipo + '/' + esc(c.ID) + '" aria-label="Editar">' + ic('lapiz', 20) + '</a>') +
-      '<div class="ficha"><div class="ficha-top"><span class="avatar ' + tipo + '">' + esc(iniciales(c.Nombre)) + '</span><div><h2>' + esc(c.Nombre) + '</h2>' + (tipo === 'interesado' ? tagTemp(c) : '') + '</div></div>' +
-      (tel || wsp ? '<div class="fila-btns">' + (tel ? '<a class="btn chico" href="' + tel + '">' + ic('tel', 18) + 'Llamar</a>' : '') + (wsp ? '<a class="btn chico" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp', 18) + 'WhatsApp</a>' : '') + '</div>' : '') +
-      '<dl class="datos">' + datos + '</dl>' +
-      '<div class="fila-btns"><a class="btn chico" href="#/a/llamada-nueva?tipo=' + tipo + '&id=' + esc(c.ID) + '">' + ic('llamadas', 18) + 'Programar llamada</a>' +
-      '<a class="btn chico" href="#/a/cita-nueva?tipo=' + agendar[0] + '&ct=' + tipo + '&id=' + esc(c.ID) + '">' + ic('cal', 18) + agendar[1] + '</a></div></div>' +
-      extra + '<button class="btn peligro ancho" data-borrar>Eliminar contacto</button></div>' + nav('contactos'), function (app) {
+    if (esAdmin()) datos += '<dt>Agente</dt><dd>' + esc(nombreAgente(c.ID_Agente)) + '</dd>';
+    pintar('<div class="pantalla">' + cabVolver(ETIQUETA_TIPO[tipo], botonMenu(menu)) +
+      '<div class="ficha"><div class="ficha-top"><span class="avatar ' + tipo + '">' + esc(iniciales(c.Nombre)) + '</span><div><h2>' + esc(c.Nombre) + '</h2>' + (esInt ? tagTemp(c, true) + tagSeg(c) : '') + '</div></div>' +
+      (tel ? '<div class="fila-btns grande"><a class="btn primario" href="' + tel + '">' + ic('tel', 20) + 'Llamar</a>' + (wsp ? '<a class="btn" href="' + esc(wsp) + '" target="_blank" rel="noopener">' + ic('wsp', 20) + 'WhatsApp</a>' : '') + '</div>'
+        : '<a class="btn ancho" href="#/a/contacto-form/' + tipo + '/' + id + '">Agregar su celular</a>') +
+      '<dl class="datos">' + datos + '</dl></div>' + extra + '</div>' + nav('contactos'), function (app) {
         enlazarVolver(app, '#/a/contactos');
-        app.querySelector('[data-borrar]').onclick = function () {
-          if (!confirm('¿Eliminar a ' + c.Nombre + '? Esta acción no se puede deshacer.')) return;
-          eliminarRegistro(TABLA_DE[tipo], c.ID).then(function () { toast('Contacto eliminado'); ir('#/a/contactos'); });
-        };
+        if (q.recos) app.querySelector('#recos').scrollIntoView();
       });
   };
 
-  VISTAS['contacto-form'] = function (p) {
-    var tipo = p[0] || 'interesado', c = p[1] ? contacto(tipo, p[1]) : null;
-    var cf = conf();
-    var defs;
-    if (tipo === 'interesado') defs = defsInteresadoAgente(cf).concat([{ n: 'Notas', l: 'Notas', t: 'area' }]);
-    else if (tipo === 'propietario') defs = [{ n: 'Nombre', l: 'Nombre', req: true, ph: 'María Quispe' }, { n: 'Celular', l: 'Celular', t: 'tel', ph: '984 123 456' }, { n: 'Notas', l: 'Notas', t: 'area' }];
-    else defs = [{ n: 'Nombre', l: 'Nombre', req: true, ph: 'Dr. Ramírez' }, { n: 'Celular', l: 'Celular', t: 'tel', ph: '984 700 120' }, { n: 'Categoria', l: 'Categoría', t: 'select', op: cf.categoriasOtros }, { n: 'Detalle', l: 'Detalle', t: 'area', ph: 'Notaría del centro' }];
-    var titulo = (c ? 'Editar ' : 'Nuevo ') + NOMBRE_TIPO[tipo].toLowerCase();
-    pintar('<div class="pantalla">' + cabVolver(titulo.charAt(0).toUpperCase() + titulo.slice(1)) +
-      (!c ? '<div class="segmento" role="group" aria-label="Tipo de contacto">' + ['interesado', 'propietario', 'otro'].map(function (t) {
-        return '<label><input type="radio" name="tipoC" value="' + t + '"' + (t === tipo ? ' checked' : '') + '><span>' + NOMBRE_TIPO[t] + '</span></label>';
-      }).join('') + '</div>' : '') +
-      '<form class="formulario" novalidate>' + defs.map(function (d) { return campo(d, c ? c[d.n] : ''); }).join('') +
-      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar</button></div></form></div>', function (app) {
+  /* ---------- Registrar y editar contactos ---------- */
+
+  VISTAS['contacto-form'] = function (p, q) {
+    var tipo = TABLA_DE[p[0]] ? p[0] : 'interesado', c = p[1] ? contacto(tipo, p[1]) : null;
+    if (p[1] && !c) return ir('#/a/contactos');
+    var b = tomarBorrador(), v = b || c || {}, ruta = location.hash, cf = conf(), cuerpo;
+    if (tipo === 'interesado') {
+      var defsBusca = defsInteresado(cf).slice(2).concat([{ n: 'DetalleInteres', l: 'Describe su interés', t: 'area', ph: 'Visitó el terreno y le gustó; espera su gratificación para separar' }, { n: 'Notas', l: 'Notas', t: 'area' }]);
+      cuerpo = campo({ n: 'Temperatura', l: '¿Qué tan interesado está?', t: 'temp', req: true }, v.Temperatura) +
+        (c ? campo({ n: 'EstadoSeguimiento', l: 'Seguimiento', t: 'seg', req: true, op: ESTADOS_SEG, clase: 'cuatro' }, estadoSeg(v)) : '') +
+        '<details class="plegable"' + (q.busca || tieneBusqueda(v) ? ' open' : '') + '><summary>¿Qué busca? <span class="opcional">(opcional)</span></summary><div class="grupo">' +
+        defsBusca.map(function (d) { return campo(d, v[d.n]); }).join('') + '</div></details>';
+    } else if (tipo === 'propietario') {
+      // Dentro de "Su propiedad (opcional)" solo el tipo va sin "(opcional)": hace falta si se registra.
+      var dp = defsPropiedad(cf).map(function (d) { return Object.assign({}, d, { n: 'P' + d.n, req: d.n === 'Tipo' }); });
+      cuerpo = c ? campo({ n: 'Notas', l: 'Notas', t: 'area' }, v.Notas)
+        : '<fieldset class="grupo"><legend>Su propiedad <span class="opcional">(opcional)</span></legend>' + dp.slice(1, 4).map(function (d) { return campo(d, v[d.n]); }).join('') +
+          '<details class="mas-detalles"><summary>Más detalles</summary><div class="grupo">' + dp.slice(0, 1).concat(dp.slice(4)).map(function (d) { return campo(d, v[d.n]); }).join('') +
+          campo({ n: 'Notas', l: 'Notas sobre el propietario', t: 'area' }, v.Notas) + '</div></details></fieldset>';
+    } else cuerpo = campo({ n: 'Categoria', l: 'Categoría', t: 'chips', op: cf.categoriasOtros }, v.Categoria) + campo({ n: 'Detalle', l: 'Detalle', t: 'area', ph: 'Notaría del centro' }, v.Detalle);
+    pintar('<div class="pantalla">' + cabVolver((c ? 'Editar ' : 'Nuevo ') + ETIQUETA_TIPO[tipo].toLowerCase()) +
+      '<form class="formulario" novalidate>' + campo({ n: 'Nombre', l: 'Nombre', req: true, ph: tipo === 'otro' ? 'Dr. Ramírez' : 'Juan Pérez' }, v.Nombre) + campo({ n: 'Celular', l: 'Celular', t: 'tel', ph: '987 654 321' }, v.Celular) +
+      cuerpo + '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar</button></div></form></div>', function (app) {
         enlazarVolver(app, '#/a/contactos');
-        app.querySelectorAll('[name=tipoC]').forEach(function (r) { r.onchange = function () { history.replaceState(null, '', '#/a/contacto-form/' + r.value); render(); }; });
         var form = app.querySelector('form');
+        if (!c) form.Nombre.focus();
         form.onsubmit = function (e) {
           e.preventDefault();
           var d = leerForm(form);
           if (!d.Nombre) return errorForm(form, 'Escribe al menos el nombre.');
+          if (tipo === 'propietario' && !c && !d.PTipo && dp.some(function (x) { return d[x.n]; })) return errorForm(form, 'Elige el tipo de su propiedad, o deja vacía esa sección.');
           if (c) d.ID = c.ID; else if (tipo !== 'otro') d.Origen = 'Agente';
-          guardarRegistro(TABLA_DE[tipo], d).then(function (g) {
-            toast('Contacto guardado');
-            history.replaceState(null, '', '#/a/contacto/' + tipo + '/' + g.ID); render();
-          }).catch(function () {});
+          if (c && tipo === 'interesado' && d.EstadoSeguimiento === 'En espera' && estadoSeg(c) !== 'En espera') d.OpcionesAvisadas = ids(coincidenFuerte(Object.assign({}, c, d)));
+          var prop = {};
+          if (tipo === 'propietario' && !c) dp.forEach(function (x) { prop[x.n.slice(1)] = d[x.n]; delete d[x.n]; });
+          var id = guardarRegistro(TABLA_DE[tipo], d, ruta);
+          history.replaceState(null, '', '#/a/contacto/' + tipo + '/' + id);
+          render();
+          if (c) return toast('Cambios guardados');
+          if (tipo === 'interesado') return trasGuardarCliente(buscarId('Interesados', id));
+          if (tipo === 'propietario') return trasGuardarPropietario(id, prop.Tipo ? guardarRegistro('Propiedades', Object.assign(prop, { ID_Propietario: id, Estado: 'Disponible', Origen: 'Agente' })) : '');
+          toast('Contacto guardado');
         };
       });
   };
+  function listo(nombre) { return '<h2 class="hoja-titulo">' + ic('check', 22) + ' ' + esc(nombreCorto(nombre)) + ' quedó guardado</h2><p class="item-sub">¿Qué hacemos ahora?</p>'; }
+  // Después de registrar un cliente: el siguiente paso más útil, a un toque.
+  function trasGuardarCliente(i) {
+    var cita = ['Agendar cita', '#/a/cita-nueva?ct=interesado&id=' + i.ID];
+    var recos = tieneBusqueda(i) ? recomendarPara(i, T('Propiedades').filter(function (p) { return p.ID_Agente === i.ID_Agente; })) : [];
+    var ops = !tieneBusqueda(i) ? [cita, ['Agregar qué busca', '#/a/contacto-form/interesado/' + i.ID + '?busca=1']]
+      : recos.length ? [['Ver propiedades recomendadas (' + recos.length + ')', '#/a/contacto/interesado/' + i.ID + '?recos=1'], cita]
+        : [['No tengo nada aún: dejarlo En espera', function () { marcarEnEspera(buscarId('Interesados', i.ID)); toast(nombreCorto(i.Nombre) + ' quedó en espera. Te avisaré cuando aparezca algo.'); render(); }], cita];
+    ops[0][2] = 'destacado';
+    abrirMenu(ops.concat([['Listo', function () {}]]), listo(i.Nombre));
+  }
+  function trasGuardarPropietario(id, idProp) {
+    var dueno = buscarId('Propietarios', id), prop = idProp && buscarId('Propiedades', idProp), n = prop ? esperandoPara(prop).length : 0;
+    S.pub = null;
+    abrirMenu((n ? [['👀 ' + plural(n, 'cliente en espera busca', 'clientes en espera buscan') + ' algo así', '#/a/propiedad/' + idProp + '?espera=1', 'destacado']] : [])
+      .concat([['Agregar ' + (prop ? 'otra ' : 'una ') + 'propiedad', '#/a/propiedad-form?dueno=' + id], ['Agendar cita de captación', '#/a/cita-nueva?ct=propietario&id=' + id], ['Listo', function () {}]]), listo(dueno ? dueno.Nombre : ''));
+  }
+
+  /* ---------- Propiedades ---------- */
 
   function tarjetaAgente(p) {
     var dueno = buscarId('Propietarios', p.ID_Propietario);
@@ -1151,7 +1622,7 @@
       return true;
     }).sort(function (a, b) { return String(b.ID).localeCompare(String(a.ID)); });
     var nFiltros = ['estado', 'operacion', 'zona', 'precioMax'].filter(function (k) { return f[k]; }).length;
-    pintar('<div class="pantalla"><div class="cab"><h1>Propiedades</h1><a class="btn-redondo" href="#/a/propiedad-form" aria-label="Agregar propiedad">' + ic('mas', 26) + '</a></div>' +
+    pintar('<div class="pantalla"><div class="cab"><h1>Propiedades</h1></div>' +
       '<div class="buscador"><div class="caja-busqueda">' + ic('buscar', 20) + '<input id="qp" type="search" placeholder="Zona, dirección o propietario" aria-label="Buscar propiedad" value="' + esc(f.q) + '"></div>' +
       '<button class="btn chico" data-filtros aria-expanded="' + f.abierto + '">' + ic('filtro', 18) + 'Filtros' + (nFiltros ? ' (' + nFiltros + ')' : '') + '</button></div>' +
       (f.abierto ? '<div class="panel-filtros">' + campo({ n: 'estado', l: 'Estado', t: 'select', op: ESTADOS_PROP, vacio: 'Todos', req: true }, f.estado) +
@@ -1163,7 +1634,7 @@
         return '<button class="chip' + (f.tipo === t ? ' activo' : '') + '" data-tipo="' + t + '">' + (t ? t + 's' : 'Todas') + '</button>';
       }).join('') + '</div>' +
       filtroAgente() + '<p class="contador">' + props.length + (props.length === 1 ? ' propiedad' : ' propiedades') + '</p>' +
-      (props.length ? '<div class="lista-props">' + props.map(tarjetaAgente).join('') + '</div>' : '<div class="vacio">No hay propiedades con esos filtros.</div>') +
+      (props.length ? '<div class="lista-props">' + paginar('p', props, tarjetaAgente) + '</div>' : '<div class="vacio">No hay propiedades con esos filtros.</div>') +
       '</div>' + nav('propiedades'), function (app) {
         app.querySelectorAll('[data-tipo]').forEach(function (b) { b.onclick = function () { f.tipo = b.dataset.tipo; VISTAS.propiedades(); }; });
         enlazarFiltroAgente(app, VISTAS.propiedades);
@@ -1182,7 +1653,7 @@
       });
   };
 
-  VISTAS.propiedad = function (p) {
+  VISTAS.propiedad = function (p, q) {
     var pr = buscarId('Propiedades', p[0]);
     if (!pr) return pintar('<div class="pantalla">' + cabVolver('Propiedad') + '<div class="vacio">Esta propiedad ya no existe.</div></div>' + nav('propiedades'), function (a) { enlazarVolver(a, '#/a/propiedades'); });
     var dueno = buscarId('Propietarios', pr.ID_Propietario);
@@ -1194,7 +1665,7 @@
     if (activa) {
       var ri = buscarId('Interesados', activa.ID_Interesado), vencida = esIso(activa.FechaLimite) && activa.FechaLimite < hoy();
       bloqueReserva = '<div class="recuadro"><span class="recuadro-titulo">Reserva activa · ' + esc(activa.ID) + '</span>' +
-        '<dl class="datos"><dt>Reservó</dt><dd>' + (ri ? '<a href="#/a/contacto/interesado/' + esc(ri.ID) + '">' + esc(ri.Nombre) + '</a>' + (ri.Celular ? '<br>' + esc(ri.Celular) : '') : 'Interesado eliminado') + '</dd>' +
+        '<dl class="datos"><dt>Reservó</dt><dd>' + (ri ? '<a href="#/a/contacto/interesado/' + esc(ri.ID) + '">' + esc(ri.Nombre) + '</a>' + (ri.Celular ? '<br>' + esc(fmtCel(ri.Celular)) : '') : 'Interesado eliminado') + '</dd>' +
         '<dt>Separación</dt><dd>' + esc(dinero(activa.MontoSeparacion) || '—') + '</dd>' +
         '<dt>Fecha de reserva</dt><dd>' + esc(fechaLarga(activa.FechaReserva) || '—') + '</dd>' +
         '<dt>Fecha límite</dt><dd' + (vencida ? ' class="alerta-texto"' : '') + '>' + esc(esIso(activa.FechaLimite) ? fechaLarga(activa.FechaLimite) + (vencida ? ' (vencida)' : '') : 'Sin fecha límite') + '</dd>' +
@@ -1202,89 +1673,87 @@
         '<div class="fila-btns"><button class="btn chico primario" data-reserva="Concretada">' + ic('check', 18) + 'Marcar como concretada</button><button class="btn chico peligro" data-reserva="Cancelada">Cancelar reserva</button></div>' +
         '<div class="fila-btns">' + (ri && telLink(ri.Celular) ? '<a class="btn chico" href="' + telLink(ri.Celular) + '">' + ic('tel', 18) + 'Llamar</a>' : '') +
         '<a class="btn chico" href="#/a/reserva/' + esc(activa.ID) + '">' + ic('lapiz', 18) + 'Editar reserva</a></div></div>';
-    } else if (pr.Estado === 'Disponible' || pr.Estado === 'Reservado') {
-      bloqueReserva = '<div class="seccion">' + (pr.Estado === 'Reservado' ? '<p class="item-sub">Figura como reservada, pero no tiene una reserva registrada.</p>' : '') +
-        '<a class="btn ancho" href="#/a/reserva-nueva?prp=' + esc(pr.ID) + '">' + ic('reserva', 20) + 'Registrar reserva</a></div>';
+    } else if (pr.Estado === 'Reservado') bloqueReserva = '<p class="item-sub">Figura como reservada, pero no tiene una reserva registrada. Regístrala desde el menú ⋯.</p>';
+    var espera = esperandoPara(pr), enEspera = {};
+    espera.forEach(function (i) { enEspera[i.ID] = 1; });
+    if (q.espera) ints.sort(function (a, b) { return (enEspera[b.i.ID] || 0) - (enEspera[a.i.ID] || 0); });
+    function cambiar(est) {
+      guardarRegistro('Propiedades', { ID: pr.ID, Estado: est });
+      S.pub = null;
+      toast(est === 'Disponible' ? 'Propiedad publicada' : 'Estado: ' + est);
+      render();
+      alertaEspera(buscarId('Propiedades', pr.ID));
     }
-    pintar('<div class="pantalla">' + cabVolver(pr.Tipo, '<a class="btn-icono borde" href="#/a/propiedad-form/' + esc(pr.ID) + '" aria-label="Editar">' + ic('lapiz', 20) + '</a>') +
+    var menu = [['Editar propiedad', '#/a/propiedad-form/' + pr.ID]];
+    if (!activa && (pr.Estado === 'Disponible' || pr.Estado === 'Reservado')) menu.push(['Registrar reserva', '#/a/reserva-nueva?prp=' + pr.ID]);
+    if (!activa) menu.push(['Cambiar estado (ahora: ' + (pr.Estado || 'sin estado') + ')', function () { abrirMenu(ESTADOS_PROP.map(function (e) { return [e, function () { cambiar(e); }]; }), '<h2 class="hoja-titulo">Estado de la propiedad</h2>'); }]);
+    menu.push(['Eliminar propiedad', function () {
+      if (confirm('¿Eliminar esta propiedad? Esta acción no se puede deshacer.')) eliminarRegistro('Propiedades', pr.ID).then(function () { S.pub = null; toast('Propiedad eliminada'); ir('#/a/propiedades'); }).catch(function () {});
+    }, 'peligro']);
+    pintar('<div class="pantalla">' + cabVolver(pr.Tipo, botonMenu(menu)) +
       (pr.Estado === 'Pendiente' ? '<div class="recuadro"><span class="recuadro-titulo">Enviada desde la app, aún no es visible en el catálogo</span><button class="btn primario" data-estado="Disponible">' + ic('check', 20) + 'Aprobar y publicar</button></div>' : '') +
       '<div class="ficha"><div class="ficha-top">' + icTipo(pr.Tipo) + '<div><h2>' + esc([num(pr.Area) != null ? num(pr.Area) + ' m²' : '', pr.Zona].filter(Boolean).join(' · ') || pr.Tipo) + '</h2><span class="precio">' + (dinero(pr.Precio) || 'Sin precio') + '</span></div></div>' +
       '<dl class="datos"><dt>Código</dt><dd>' + esc(pr.ID) + '</dd><dt>Estado</dt><dd><span class="estado ' + esc(pr.Estado) + '">' + esc(pr.Estado || '—') + '</span></dd>' +
       '<dt>Operación</dt><dd>' + esc(pr.Operacion || '—') + '</dd><dt>Dirección</dt><dd>' + esc(pr.Direccion || '—') + '</dd>' +
       '<dt>Dormitorios</dt><dd>' + esc(pr.Dormitorios || '—') + '</dd><dt>Características</dt><dd>' + esc(pr.Caracteristicas || '—') + '</dd>' +
       (pr.Descripcion ? '<dt>Descripción</dt><dd>' + esc(pr.Descripcion) + '</dd>' : '') +
-      '<dt>Propietario</dt><dd>' + (dueno ? '<a href="#/a/contacto/propietario/' + esc(dueno.ID) + '">' + esc(dueno.Nombre) + '</a>' + (dueno.Celular ? '<br>' + esc(dueno.Celular) : '') : '—') + '</dd>' +
+      '<dt>Propietario</dt><dd>' + (dueno ? '<a href="#/a/contacto/propietario/' + esc(dueno.ID) + '">' + esc(dueno.Nombre) + '</a>' + (dueno.Celular ? '<br>' + esc(fmtCel(dueno.Celular)) : '') : '—') + '</dd>' +
       (esAdmin() ? '<dt>Agente</dt><dd>' + esc(nombreAgente(pr.ID_Agente)) + '</dd>' : '') + '</dl>' +
-      (activa ? '<p class="item-sub">El estado depende de la reserva activa: cambia al marcarla como concretada o cancelada.</p>'
-        : '<div class="campo"><label for="f_est">Cambiar estado</label><select id="f_est">' + ESTADOS_PROP.map(function (e) { return '<option' + (e === pr.Estado ? ' selected' : '') + '>' + e + '</option>'; }).join('') + '</select></div>') + '</div>' +
+      (activa ? '<p class="item-sub">El estado depende de la reserva activa: cambia al marcarla como concretada o cancelada.</p>' : '') + '</div>' +
+      '<a class="btn primario ancho grande" href="#/a/cita-nueva?prp=' + esc(pr.ID) + '">' + ic('cal', 20) + 'Agendar visita</a>' +
       bloqueReserva +
-      '<div class="seccion"><div class="seccion-cab"><h2>Interesados que coinciden</h2></div>' + (ints.length ? ints.map(function (x) {
-        return '<div class="reco"><a class="reco-cab" href="#/a/contacto/interesado/' + esc(x.i.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(x.i.Nombre) + ' ' + tagTemp(x.i) + '</span><span class="prop-sub">' + esc(x.i.Celular || 'Sin celular') + '</span>' +
+      cabSeccion('Clientes que coinciden', '', ' id="coinciden"') + (espera.length ? '<p class="item-sub">' + plural(espera.length, 'cliente en espera busca', 'clientes en espera buscan') + ' algo así.</p>' : '') + (ints.length ? paginar('ci', ints, function (x) {
+        return '<div class="reco"><a class="reco-cab" href="#/a/contacto/interesado/' + esc(x.i.ID) + '">' + htmlPuntaje(x.m) + '<div class="prop-cuerpo"><span class="prop-titulo">' + esc(x.i.Nombre) + ' ' + tagTemp(x.i) + (enEspera[x.i.ID] ? ' <span class="tag-seg enespera">En espera</span>' : '') + '</span><span class="prop-sub">' + esc(x.i.Celular ? fmtCel(x.i.Celular) : 'Sin celular') + '</span>' +
           (x.i.DetalleInteres ? '<span class="prop-sub">' + esc(x.i.DetalleInteres) + '</span>' : '') + '</div></a>' +
           htmlRazones(x.m.razones) + '<div class="fila-btns">' + (telLink(x.i.Celular) ? '<a class="btn chico" href="' + telLink(x.i.Celular) + '">' + ic('tel', 18) + 'Llamar</a>' : '') +
-          '<a class="btn chico" href="#/a/cita-nueva?tipo=visita&ct=interesado&id=' + esc(x.i.ID) + '&prp=' + esc(pr.ID) + '">' + ic('cal', 18) + 'Agendar cita</a></div></div>';
-      }).join('') : '<div class="vacio">Ningún interesado coincide todavía.</div>') + '</div>' +
-      (citas.length ? '<div class="seccion"><div class="seccion-cab"><h2>Citas</h2></div><div class="lista">' + citas.map(function (c) { return itemCita(c, 'fecha'); }).join('') + '</div></div>' : '') +
-      (historial.length ? '<div class="seccion"><div class="seccion-cab"><h2>Historial de reservas</h2></div><div class="lista">' + historial.map(function (r) { return itemReserva(r, 'propiedad'); }).join('') + '</div></div>' : '') +
-      '<button class="btn peligro ancho" data-borrar>Eliminar propiedad</button></div>' + nav('propiedades'), function (app) {
+          '<a class="btn chico" href="#/a/cita-nueva?ct=interesado&id=' + esc(x.i.ID) + '&prp=' + esc(pr.ID) + '">' + ic('cal', 18) + 'Agendar cita</a></div></div>';
+      }) : '<div class="vacio">Ningún cliente coincide todavía.</div>') + '</div>' +
+      (citas.length ? cabSeccion('Citas') + '<div class="lista">' + citas.map(function (c) { return itemCita(c, 'fecha'); }).join('') + '</div></div>' : '') +
+      (historial.length ? cabSeccion('Historial de reservas') + '<div class="lista">' + historial.map(function (r) { return itemReserva(r, 'propiedad'); }).join('') + '</div></div>' : '') +
+      '</div>' + nav('propiedades'), function (app) {
         enlazarVolver(app, '#/a/propiedades');
-        function cambiar(est) {
-          guardarRegistro('Propiedades', Object.assign({}, pr, { Estado: est })).then(function () { S.pub = null; toast(est === 'Disponible' ? 'Propiedad publicada' : 'Estado: ' + est); VISTAS.propiedad(p); }).catch(function () { VISTAS.propiedad(p); });
-        }
+        if (q.espera) app.querySelector('#coinciden').scrollIntoView();
         var ap = app.querySelector('[data-estado]');
         if (ap) ap.onclick = function () { cambiar('Disponible'); };
-        var sel = app.querySelector('#f_est');
-        if (sel) sel.onchange = function (e) { cambiar(e.target.value); };
         app.querySelectorAll('[data-reserva]').forEach(function (b) {
           b.onclick = function () {
             var est = b.dataset.reserva, destino = pr.Operacion === 'Alquiler' ? 'Alquilado' : 'Vendido';
             if (!confirm(est === 'Concretada' ? '¿Marcar la reserva como concretada? La propiedad pasará a "' + destino + '".' : '¿Cancelar la reserva? La propiedad volverá a estar disponible en el catálogo.')) return;
             guardarReserva({ ID: activa.ID, Estado: est }).then(function () {
-              toast(est === 'Concretada' ? 'Reserva concretada · ' + destino : 'Reserva cancelada');
-              VISTAS.propiedad(p);
+              toast(est === 'Concretada' ? 'Reserva concretada · ' + destino + '. El cliente pasó a "Compró".' : 'Reserva cancelada');
+              render();
+              if (est === 'Cancelada') alertaEspera(buscarId('Propiedades', pr.ID));
             }).catch(function () {});
           };
         });
-        app.querySelector('[data-borrar]').onclick = function () {
-          if (!confirm('¿Eliminar esta propiedad? Esta acción no se puede deshacer.')) return;
-          eliminarRegistro('Propiedades', pr.ID).then(function () { S.pub = null; toast('Propiedad eliminada'); ir('#/a/propiedades'); });
-        };
       });
   };
 
   VISTAS['propiedad-form'] = function (p, q) {
     var pr = p[0] ? buscarId('Propiedades', p[0]) : null;
-    var cf = conf();
-    var duenos = T('Propietarios').slice().sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); });
-    var duenoSel = pr ? pr.ID_Propietario : (q.dueno || '');
-    var activa = pr && reservaActiva(pr.ID);
+    var cf = conf(), activa = pr && reservaActiva(pr.ID), ruta = location.hash, v = tomarBorrador() || pr || {};
+    var dueno = v.ID_Propietario || q.dueno;
+    dueno = dueno ? { tipo: 'propietario', id: dueno } : null;
     pintar('<div class="pantalla">' + cabVolver(pr ? 'Editar propiedad' : 'Nueva propiedad') +
-      '<form class="formulario" novalidate>' +
-      campo({ n: 'ID_Propietario', l: 'Propietario', t: 'select', op: duenos.map(function (d) { return [d.ID, d.Nombre]; }).concat([['__nuevo', '+ Registrar nuevo propietario']]) }, duenoSel) +
-      '<div class="recuadro" id="nuevoDueno" hidden><span class="recuadro-titulo">Nuevo propietario</span>' + campo({ n: 'NuevoNombre', l: 'Nombre', req: true }) + campo({ n: 'NuevoCelular', l: 'Celular', t: 'tel' }) + '</div>' +
-      defsPropiedad(cf).map(function (d) { return campo(d, pr ? pr[d.n] : ''); }).join('') +
+      '<form class="formulario" novalidate><span class="etiqueta">Propietario <span class="opcional">(opcional)</span></span><div id="quien"></div>' +
+      defsPropiedad(cf).map(function (d) { return campo(d, v[d.n]); }).join('') +
       (activa ? '<p class="item-sub">Estado: Reservado. Cambia cuando marques la reserva como concretada o cancelada.</p>'
         : campo({ n: 'Estado', l: 'Estado', t: 'select', op: ESTADOS_PROP, vacio: false, req: true }, pr ? pr.Estado : 'Disponible')) +
       '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar propiedad</button></div></form></div>', function (app) {
         enlazarVolver(app, '#/a/propiedades');
-        var form = app.querySelector('form'), sel = app.querySelector('#f_ID_Propietario'), caja = app.querySelector('#nuevoDueno');
-        sel.onchange = function () { caja.hidden = sel.value !== '__nuevo'; };
+        var form = app.querySelector('form');
+        selectorContacto(app.querySelector('#quien'), ['propietario'], dueno, function (x) { dueno = x; });
         form.onsubmit = function (e) {
           e.preventDefault();
           var d = leerForm(form);
           if (!d.Tipo) return errorForm(form, 'Elige el tipo de propiedad.');
-          var nuevo = d.ID_Propietario === '__nuevo';
-          if (nuevo && !d.NuevoNombre) return errorForm(form, 'Escribe el nombre del nuevo propietario.');
-          var paso = nuevo ? guardarRegistro('Propietarios', { Nombre: d.NuevoNombre, Celular: d.NuevoCelular, Origen: 'Agente' }) : Promise.resolve(null);
-          paso.then(function (dn) {
-            if (dn) d.ID_Propietario = dn.ID;
-            delete d.NuevoNombre; delete d.NuevoCelular;
-            if (pr) d.ID = pr.ID; else d.Origen = 'Agente';
-            return guardarRegistro('Propiedades', d);
-          }).then(function (g) {
-            S.pub = null; toast('Propiedad guardada');
-            history.replaceState(null, '', '#/a/propiedad/' + g.ID); render();
-          }).catch(function () {});
+          d.ID_Propietario = dueno ? dueno.id : '';
+          if (pr) d.ID = pr.ID; else d.Origen = 'Agente';
+          var id = guardarRegistro('Propiedades', d, ruta), antes = pr ? pr.Estado : '';
+          S.pub = null;
+          history.replaceState(null, '', '#/a/propiedad/' + id); render();
+          toast('Propiedad guardada');
+          if (antes !== 'Disponible') alertaEspera(buscarId('Propiedades', id));
         };
       });
   };
@@ -1298,13 +1767,13 @@
     prox.forEach(function (c) { (porDia[c.Fecha] = porDia[c.Fecha] || []).push(c); });
     var bloques = Object.keys(porDia).sort().map(function (f) {
       var t = f === h ? 'Hoy · ' + fechaLarga(f).toLowerCase() : fechaLarga(f);
-      return '<div class="seccion"><div class="seccion-cab"><h2>' + esc(t) + '</h2></div><div class="lista">' + porDia[f].map(function (c) { return itemCita(c); }).join('') + '</div></div>';
+      return cabSeccion(esc(t)) + '<div class="lista">' + porDia[f].map(function (c) { return itemCita(c); }).join('') + '</div></div>';
     }).join('');
     pintar('<div class="pantalla"><div class="cab"><h1>Citas</h1></div>' + filtroAgente() +
       '<a class="btn primario ancho" href="#/a/cita-nueva">' + ic('mas', 22) + 'Agendar cita</a>' +
       (bloques || '<div class="vacio">No tienes citas próximas.</div>') +
       (pasadas.length ? '<button class="btn ancho" data-pasadas>' + (S.verPasadas ? 'Ocultar citas pasadas' : 'Ver citas pasadas (' + pasadas.length + ')') + '</button>' +
-        (S.verPasadas ? '<div class="lista">' + pasadas.map(function (c) { return itemCita(c, 'fecha'); }).join('') + '</div>' : '') : '') +
+        (S.verPasadas ? '<div class="lista">' + paginar('cp', pasadas, function (c) { return itemCita(c, 'fecha'); }) + '</div>' : '') : '') +
       '</div>' + nav('citas'), function (app) {
         var b = app.querySelector('[data-pasadas]');
         if (b) b.onclick = function () { S.verPasadas = !S.verPasadas; VISTAS.citas(); };
@@ -1312,124 +1781,62 @@
       });
   };
 
-  function opcionesContacto(t, conNuevo) {
-    var arr = T(TABLA_DE[t]).slice().sort(function (a, b) { return a.Nombre.localeCompare(b.Nombre); }).map(function (c) {
-      return [c.ID, c.Nombre + (t === 'otro' && c.Categoria ? ' · ' + c.Categoria : '') + (c.Celular ? ' · ' + c.Celular : '')];
-    });
-    if (conNuevo) arr.push(['__nuevo', t === 'otro' ? '+ Registrar nuevo contacto' : '+ Registrar nuevo ' + NOMBRE_TIPO[t].toLowerCase()]);
-    return arr;
-  }
 
+  /* ---------- Agendar una cita ---------- */
+
+  // Tres preguntas: ¿con quién?, ¿cuándo? y ¿qué propiedad? (opcional). El tipo de cita se deduce solo.
   function formCita(c, q) {
-    var cf = conf();
-    var k = c ? contactoDeCita(c) : null;
-    var tcita = c ? tipoDeCita(c) : ({ captacion: 'Captación', reunion: 'Reunión' }[q.tipo] || 'Visita');
-    var tipo = k ? k.tipo : (CONTACTO_DE_CITA[tcita] || (TABLA_DE[q.ct] ? q.ct : 'interesado'));
-    var v = c ? Object.assign({}, c, { ID_Contacto: k.id }) : { ID_Contacto: q.id || q.int || '', ID_Propiedad: q.prp || '', Fecha: hoy(), Hora: '', Notas: '', Estado: 'Pendiente' };
-    function campoContacto(valor) {
-      var elige = tcita === 'Reunión' ? 'un contacto' : (tipo === 'propietario' ? 'el propietario' : 'el interesado');
-      return campo({ n: 'ID_Contacto', l: tcita === 'Reunión' ? 'Contacto' : NOMBRE_TIPO[tipo], t: 'select', op: opcionesContacto(tipo, true), vacio: '— Elige ' + elige + ' —' }, valor);
-    }
-    function htmlContacto(valor) {
-      return (tcita === 'Reunión' ? campo({ n: 'TipoContacto', l: '¿Con quién es la reunión?', t: 'seg', op: [['interesado', 'Interesado'], ['propietario', 'Propietario'], ['otro', 'Otro']], req: true }, tipo) : '') +
-        '<div id="selContacto">' + campoContacto(valor) + '</div>';
-    }
-    function htmlNuevo() {
-      return '<span class="recuadro-titulo">Nuevo ' + (tipo === 'otro' ? 'contacto' : NOMBRE_TIPO[tipo].toLowerCase()) + '</span>' +
-        campo({ n: 'NNombre', l: 'Nombre', req: true }) + campo({ n: 'NCelular', l: 'Celular', t: 'tel', ph: '984 123 456' }) +
-        (tipo === 'otro' ? campo({ n: 'NCategoria', l: 'Categoría', t: 'select', op: cf.categoriasOtros }) + campo({ n: 'NDetalle', l: 'Detalle', t: 'area', ph: 'Notaría del centro' }) : '');
-    }
-    // En Captación solo aparecen las propiedades del propietario elegido.
-    function campoPropiedad(idDueno, valor) {
-      var props = T('Propiedades').filter(function (p) {
-        if (p.ID === valor) return true;
-        if (tcita === 'Captación') return !!idDueno && p.ID_Propietario === idDueno;
-        if (tcita === 'Visita') return p.Estado !== 'Vendido' && p.Estado !== 'Alquilado';
-        return true;
-      });
-      return campo({ n: 'ID_Propiedad', l: { 'Visita': 'Propiedad a visitar', 'Captación': 'Propiedad a captar', 'Reunión': 'Propiedad relacionada' }[tcita], t: 'select',
-        op: props.map(function (p) { return [p.ID, resumenProp(p) + (p.Precio ? ' · ' + dinero(p.Precio) : '')]; }),
-        vacio: { 'Visita': '— Sin indicar —', 'Captación': 'Aún no registrada', 'Reunión': 'Ninguna' }[tcita] }, valor);
-    }
-    function resumen(idp, idc) {
-      var p = buscarId('Propiedades', idp), ct = idc && idc !== '__nuevo' ? contacto(tipo, idc) : null, d = p && buscarId('Propietarios', p.ID_Propietario);
-      if (!p && !ct) return '';
-      return '<div class="ficha compacta">' + (ct ? '<p class="item-sub">' + NOMBRE_TIPO[tipo] + ': <strong>' + esc(ct.Nombre) + '</strong>' + (ct.Celular ? ' · ' + esc(ct.Celular) : '') + (tipo === 'interesado' ? ' ' + tagTemp(ct) : '') + '</p>' : '') +
-        (p ? '<p class="resaltado">' + esc(resumenProp(p)) + (p.Precio ? ' · ' + dinero(p.Precio) : '') + '</p><p class="item-sub">Propietario: ' + esc(d ? d.Nombre + (d.Celular ? ' · ' + d.Celular : '') : '—') + '</p><p class="item-sub">Dirección: ' + esc(p.Direccion || '—') + '</p>' : '') + '</div>';
-    }
-    pintar('<div class="pantalla">' + cabVolver(c ? 'Cita' : 'Nueva cita') +
-      (c ? '<a class="btn ancho' + (faltaResultado(c) ? ' primario' : '') + '" href="#/a/como-te-fue/' + esc(c.ID) + '">' + ic('check', 20) + '¿Cómo te fue?</a>' : '') +
-      '<form class="formulario" novalidate>' +
-      campo({ n: 'TipoCita', l: 'Tipo de cita', t: 'seg', op: TIPOS_CITA, req: true }, tcita) +
-      '<p class="item-sub" id="ayudaCita">' + esc(AYUDA_CITA[tcita]) + '</p>' +
-      '<div class="grupo" id="zonaContacto">' + htmlContacto(v.ID_Contacto) + '</div>' +
-      '<div class="recuadro" id="nuevoContacto" hidden>' + htmlNuevo() + '</div>' +
-      '<div id="zonaProp">' + campoPropiedad(tipo === 'propietario' ? v.ID_Contacto : '', v.ID_Propiedad) + '</div>' +
-      '<div id="resumenCita">' + resumen(v.ID_Propiedad, v.ID_Contacto) + '</div>' +
-      '<div class="dos-col">' + campo({ n: 'Fecha', l: 'Fecha', t: 'date', req: true }, v.Fecha) + campo({ n: 'Hora', l: 'Hora', t: 'time' }, v.Hora) + '</div>' +
-      campo({ n: 'Notas', l: 'Notas', t: 'area', ph: 'Llevar plano y copia literal' }, v.Notas) +
-      (c ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ESTADOS_CITA, req: true }, v.Estado || 'Pendiente') + campo({ n: 'Resultado', l: 'Resultado', t: 'area', ph: 'En qué quedaron' }, v.Resultado) : '') +
-      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar cita</button>' + (c ? '<button class="btn peligro ancho" type="button" data-borrar>Eliminar cita</button>' : '') + '</div></form></div>', function (app) {
+    var b = tomarBorrador(), v = b || c || {}, ruta = location.hash, k = (c || b) ? contactoDeCita(v) : null;
+    var sel = k && k.id ? { tipo: k.tipo, id: k.id } : (q.id ? { tipo: TABLA_DE[q.ct] ? q.ct : 'interesado', id: q.id } : null);
+    var tcita = (c || b) ? tipoDeCita(v) : ({ visita: 'Visita', captacion: 'Captación', reunion: 'Reunión' }[q.tipo] || ''), propSel = v.ID_Propiedad || q.prp || '';
+    var fecha = v.Fecha || (new Date().getHours() >= 17 ? sumarDias(hoy(), 1) : hoy());
+    function tipoCita() { return tcita || { interesado: 'Visita', propietario: 'Captación', otro: 'Reunión' }[sel ? sel.tipo : 'interesado']; }
+    var menu = c ? botonMenu([['Pantalla completa de “¿Cómo te fue?”', '#/a/como-te-fue/' + c.ID], ['Eliminar cita', function () {
+      if (confirm('¿Eliminar esta cita?')) eliminarRegistro('Citas', c.ID).then(function () { toast('Cita eliminada'); ir('#/a/citas'); }).catch(function () {});
+    }, 'peligro']]) : '';
+    pintar('<div class="pantalla">' + cabVolver(c ? 'Cita' : 'Nueva cita', menu) +
+      (c && yaPaso(c) ? '<button type="button" class="btn primario ancho" data-a="ok" data-id="' + esc(c.ID) + '">✅ ¿Cómo te fue?</button>' : '') +
+      '<form class="formulario" novalidate><div class="pregunta"><h2>¿Con quién?</h2><button type="button" id="tipoCita"></button></div><div id="quien"></div>' +
+      '<h2 class="pregunta">¿Cuándo?</h2>' + campoCuando(fecha, horaDe(v), true) + '<div id="queProp"></div>' +
+      '<details class="mas-detalles"' + (v.Notas ? ' open' : '') + '><summary>Más detalles</summary><div class="grupo">' + campo({ n: 'Notas', l: 'Notas', t: 'area', ph: 'Llevar plano y copia literal' }, v.Notas) +
+      campo({ n: 'OtraProp', l: 'Otra propiedad', t: 'select', vacio: 'Ninguna', op: T('Propiedades').map(function (p) { return [p.ID, resumenProp(p) + (p.Precio ? ' · ' + dinero(p.Precio) : '')]; }) }) +
+      (c ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ESTADOS_CITA, req: true }, v.Estado || 'Pendiente') + campo({ n: 'Resultado', l: 'Resultado', t: 'area', ph: 'En qué quedaron' }, v.Resultado) : '') + '</div></details>' +
+      '<div class="barra-guardar"><button class="btn primario ancho grande" type="submit">' + (c ? 'Guardar cambios' : 'Agendar') + '</button></div></form></div>', function (app) {
         enlazarVolver(app, '#/a/citas');
-        var form = app.querySelector('form');
-        var caja = app.querySelector('#nuevoContacto');
-        function idDueno() { return tipo === 'propietario' && form.ID_Contacto.value !== '__nuevo' ? form.ID_Contacto.value : ''; }
-        function act() { app.querySelector('#resumenCita').innerHTML = resumen(form.ID_Propiedad.value, form.ID_Contacto.value); }
-        function pintarProp() {
-          var actual = buscarId('Propiedades', form.ID_Propiedad.value);
-          var valor = actual && (tcita !== 'Captación' || actual.ID_Propietario === idDueno()) ? actual.ID : '';
-          app.querySelector('#zonaProp').innerHTML = campoPropiedad(idDueno(), valor);
-          form.ID_Propiedad.onchange = act;
+        var form = app.querySelector('form'), tbtn = app.querySelector('#tipoCita');
+        function pintarTipo() {
+          var t = tipoCita();
+          tbtn.className = 'tag-cita grande ' + CLASE_CITA[t];
+          tbtn.textContent = t + ' ▾';
+          tbtn.setAttribute('aria-label', 'Tipo de cita: ' + t + '. Tocar para cambiarlo');
         }
-        function alCambiarContacto() {
-          caja.hidden = form.ID_Contacto.value !== '__nuevo';
-          if (tcita === 'Captación') pintarProp();
-          act();
+        tbtn.onclick = function () { abrirMenu(TIPOS_CITA.map(function (t) { return [t + ': ' + AYUDA_CITA[t].toLowerCase(), function () { tcita = t; pintarTipo(); }]; }), '<h2 class="hoja-titulo">Tipo de cita</h2>'); };
+        // Tarjetas de un toque: las recomendadas para el cliente o las del propietario.
+        function pintarProps() {
+          var ct = sel && contacto(sel.tipo, sel.id), arr = [];
+          if (ct && sel.tipo === 'interesado') arr = recomendarPara(ct, T('Propiedades').filter(function (p) { return p.ID_Agente === ct.ID_Agente; })).slice(0, 4).map(function (x) { return x.p; });
+          if (sel && sel.tipo === 'propietario') arr = T('Propiedades').filter(function (p) { return p.ID_Propietario === sel.id; });
+          var elegida = buscarId('Propiedades', propSel);
+          if (elegida && arr.indexOf(elegida) < 0) arr.unshift(elegida);
+          app.querySelector('#queProp').innerHTML = arr.length ? '<h2 class="pregunta">¿Qué propiedad? <span class="opcional">(opcional)</span></h2><div class="tarjetas-prop">' + arr.map(function (p) {
+            return '<label><input type="radio" name="Prop" value="' + esc(p.ID) + '" data-toggle' + (p.ID === propSel ? ' checked data-on="1"' : '') + '><span>' + ic(ICONO_TIPO[p.Tipo] || 'edificio', 20) +
+              '<strong>' + esc(resumenProp(p)) + '</strong><small>' + (dinero(p.Precio) || 'Sin precio') + '</small></span></label>';
+          }).join('') + '</div>' : '';
         }
-        function enlazarContacto() {
-          form.ID_Contacto.onchange = alCambiarContacto;
-          form.querySelectorAll('[name=TipoContacto]').forEach(function (r) { r.onchange = function () { tipo = r.value; pintarContacto(false, ''); }; });
-        }
-        function pintarContacto(conTipo, valor) {
-          if (conTipo) app.querySelector('#zonaContacto').innerHTML = htmlContacto(valor);
-          else app.querySelector('#selContacto').innerHTML = campoContacto(valor);
-          caja.innerHTML = htmlNuevo();
-          if (!valor && !T(TABLA_DE[tipo]).length) form.ID_Contacto.value = '__nuevo';
-          enlazarContacto(); alCambiarContacto();
-        }
-        form.querySelectorAll('[name=TipoCita]').forEach(function (r) {
-          r.onchange = function () {
-            var antes = { tipo: tipo, id: form.ID_Contacto.value };
-            tcita = r.value;
-            tipo = CONTACTO_DE_CITA[tcita] || antes.tipo;
-            app.querySelector('#ayudaCita').textContent = AYUDA_CITA[tcita];
-            pintarContacto(true, antes.tipo === tipo ? antes.id : '');
-            pintarProp(); act();
-          };
-        });
-        enlazarContacto();
-        form.ID_Propiedad.onchange = act;
-        if (!v.ID_Contacto && !T(TABLA_DE[tipo]).length) form.ID_Contacto.value = '__nuevo';
-        caja.hidden = form.ID_Contacto.value !== '__nuevo';
+        selectorContacto(app.querySelector('#quien'), ['interesado', 'propietario', 'otro'], sel, function (x) { sel = x; pintarTipo(); pintarProps(); });
+        pintarTipo(); pintarProps();
+        form.addEventListener('change', function (e) { if (e.target.name === 'Prop') propSel = e.target.checked ? e.target.value : ''; });
         form.onsubmit = function (e) {
           e.preventDefault();
-          var d = leerForm(form);
-          if (!d.Fecha) return errorForm(form, 'Elige la fecha de la cita.');
-          var nuevo = d.ID_Contacto === '__nuevo';
-          if (nuevo && !d.NNombre) return errorForm(form, 'Escribe el nombre del nuevo contacto.');
-          var datosNuevo = tipo === 'otro' ? { Nombre: d.NNombre, Celular: d.NCelular, Categoria: d.NCategoria, Detalle: d.NDetalle } : { Nombre: d.NNombre, Celular: d.NCelular, Origen: 'Agente' };
-          var paso = nuevo ? guardarRegistro(TABLA_DE[tipo], datosNuevo) : Promise.resolve(null);
-          paso.then(function (nc) {
-            var idc = nc ? nc.ID : d.ID_Contacto;
-            var reg = { TipoCita: tcita, TipoContacto: NOMBRE_TIPO[tipo], ID_Contacto: idc, ID_Interesado: tipo === 'interesado' ? idc : '', ID_Propiedad: d.ID_Propiedad, Fecha: d.Fecha, Hora: d.Hora, Notas: d.Notas, Estado: c ? (d.Estado || 'Pendiente') : 'Pendiente' };
-            if (c) { reg.ID = c.ID; reg.Resultado = d.Resultado; }
-            return guardarRegistro('Citas', reg);
-          }).then(function () { toast('Cita guardada'); ir('#/a/citas'); }).catch(function () {});
-        };
-        var b = app.querySelector('[data-borrar]');
-        if (b) b.onclick = function () {
-          if (!confirm('¿Eliminar esta cita?')) return;
-          eliminarRegistro('Citas', c.ID).then(function () { toast('Cita eliminada'); ir('#/a/citas'); });
+          var d = leerForm(form), w = leerCuando(d), tc = tipoCita();
+          if (!sel) return errorForm(form, 'Elige con quién es la cita.');
+          if (!w.Fecha) return errorForm(form, 'Elige el día de la cita.');
+          var reg = { TipoCita: tc, TipoContacto: NOMBRE_TIPO[sel.tipo], ID_Contacto: sel.id, ID_Interesado: sel.tipo === 'interesado' ? sel.id : '', ID_Propiedad: d.OtraProp || propSel,
+            Fecha: w.Fecha, Hora: w.Hora, Notas: d.Notas, Estado: c ? d.Estado || 'Pendiente' : 'Pendiente' };
+          if (c) { reg.ID = c.ID; reg.Resultado = d.Resultado; }
+          guardarRegistro('Citas', reg, ruta);
+          toast((c ? 'Cita guardada: ' : 'Cita agendada: ') + fechaCorta(w.Fecha).toLowerCase() + (w.Hora ? ' a las ' + w.Hora.replace(/^0/, '') : ''));
+          volver('#/a/citas');
         };
       });
   }
@@ -1440,19 +1847,75 @@
     formCita(c, {});
   };
 
-  /* ---------- ¿Cómo te fue? (cerrar una cita) ---------- */
+  /* ---------- ¿Cómo te fue? rápido ---------- */
 
-  // Guarda la cita, el interesado y la llamada de seguimiento en una sola acción del servidor.
-  function cerrarCita(datos) {
-    cargando(true);
-    return api('cerrarCita', datos).then(function (r) {
-      cargando(false);
-      if (!r.ok) { toast(r.error || 'No se pudo guardar.'); throw new Error(r.error); }
-      ponerEnCache('Citas', r.data.cita);
-      if (r.data.interesado) ponerEnCache('Interesados', r.data.interesado);
-      if (r.data.llamada) ponerEnCache('Llamadas', r.data.llamada);
-      return r.data;
-    });
+  function cerrarRapido(c, datos) {
+    datos.ID = c.ID;
+    encolar({ accion: 'cerrarCita', datos: datos });
+    render();
+  }
+  // ✅ Se realizó: respuestas de un toque, temperatura sugerida y "¿Algo más?".
+  function panelOk(id) {
+    var c = buscarId('Citas', id), x = partesCita(c), esInt = x.k.tipo === 'interesado' && !!x.ct;
+    var resp = esInt ? RESPUESTAS : RESPUESTAS_OTRO.map(function (r) { return [r, '']; });
+    hoja('<form class="formulario" novalidate><h2 class="hoja-titulo">✅ ¿Cómo te fue con ' + esc(nombreCorto(x.nombre)) + '?</h2>' +
+      '<div class="multi" role="group" aria-label="Respuestas rápidas">' + resp.map(function (r) { return '<label><input type="checkbox" name="R" value="' + esc(r[0]) + '"><span>' + esc(r[0]) + '</span></label>'; }).join('') + '</div>' +
+      (esInt ? campo({ n: 'Temperatura', l: 'Nivel de interés', t: 'temp', req: true }, x.ct.Temperatura) : '') +
+      campo({ n: 'Mas', l: '¿Algo más?', t: 'area', ph: 'Solo si hace falta' }) +
+      '<button class="btn primario ancho" type="submit">Guardar</button></form>', function (h, cerrar) {
+        var f = h.querySelector('form'), tocada = false;
+        f.addEventListener('change', function (e) {
+          if (e.target.name === 'Temperatura') tocada = true;
+          if (e.target.name !== 'R' || !esInt || tocada) return;
+          // Sugerencia: Caliente gana a Tibio y Tibio a Frío.
+          var marcadas = lista(leerForm(f).R), sug = ['Caliente', 'Tibio', 'Frío'].filter(function (t) {
+            return resp.some(function (r) { return r[1] === t && marcadas.indexOf(r[0]) >= 0; });
+          })[0];
+          if (sug) f.querySelector('[name=Temperatura][value="' + sug + '"]').checked = true;
+        });
+        f.onsubmit = function (e) {
+          e.preventDefault();
+          var d = leerForm(f), m = lista(d.R), datos = { Que: 'realizada', Resultado: m.concat(d.Mas ? [d.Mas] : []).join('. ') };
+          if (esInt) {
+            datos.Interesado = { Temperatura: d.Temperatura };
+            if (m.indexOf(AVISO) >= 0) { datos.Interesado.EstadoSeguimiento = 'En espera'; datos.Interesado.OpcionesAvisadas = ids(coincidenFuerte(x.ct)); }
+          }
+          cerrar();
+          cerrarRapido(c, datos);
+          sugerir(c, m);
+        };
+      });
+  }
+  // 🔄 Reprogramar: directo a los botones de día y hora.
+  function panelReprog(id) {
+    var c = buscarId('Citas', id);
+    hoja('<form class="formulario" novalidate><h2 class="hoja-titulo">🔄 ¿Para cuándo la pasamos?</h2>' + campoCuando('', horaDe(c), true) +
+      '<button class="btn primario ancho" type="submit">Reprogramar</button></form>', function (h, cerrar) {
+        h.querySelector('form').onsubmit = function (e) {
+          e.preventDefault();
+          var w = leerCuando(leerForm(e.target));
+          if (!w.Fecha) return toast('Elige el día.');
+          cerrar();
+          cerrarRapido(c, { Que: 'reprogramada', Fecha: w.Fecha, Hora: w.Hora, Resultado: c.Resultado || '' });
+          toast('Cita pasada a ' + fechaCorta(w.Fecha).toLowerCase() + (w.Hora ? ' a las ' + w.Hora.replace(/^0/, '') : ''));
+        };
+      });
+  }
+  // Después de guardar: una sola sugerencia de un toque según el resultado. Si se ignora, se va sola.
+  function sugerir(c, m) {
+    var k = contactoDeCita(c), prp = c.ID_Propiedad ? '&prp=' + c.ID_Propiedad : '';
+    function hay(r) { return m.indexOf(r) >= 0; }
+    var manana = ['Programar llamada para mañana', function () {
+      guardarRegistro('Llamadas', { TipoContacto: NOMBRE_TIPO[k.tipo], ID_Contacto: k.id, ID_Propiedad: c.ID_Propiedad, Motivo: 'Seguimiento', Fecha: sumarDias(hoy(), 1), Estado: 'Pendiente' });
+      toast('Llamada programada para mañana'); render();
+    }];
+    var s = k.tipo !== 'interesado' ? (tipoDeCita(c) === 'Captación' && !c.ID_Propiedad ? ['Registrar su propiedad', '#/a/propiedad-form?dueno=' + k.id] : manana)
+      : hay('Va a separar') ? ['Registrar reserva', '#/a/reserva-nueva?int=' + k.id + prp]
+        : hay('Quiere volver a verla') ? ['Agendar otra visita', '#/a/cita-nueva?ct=interesado&id=' + k.id + prp]
+          : hay(AVISO) ? null
+            : hay('No le interesó') || hay('Le pareció caro') ? ['Ver otras opciones', '#/a/contacto/interesado/' + k.id + '?recos=1'] : manana;
+    if (!s) return toast('Guardado. Quedó en espera: te avisaré cuando aparezca algo.');
+    toast('Guardado', s[0], typeof s[1] === 'function' ? s[1] : function () { ir(s[1]); });
   }
 
   VISTAS['como-te-fue'] = function (p) {
@@ -1526,67 +1989,45 @@
             if (editando) editables.forEach(function (df) { datos.Interesado[df.n] = d[df.n]; });
           }
           if (siguiente === 'llamada') datos.Llamada = { Fecha: d.LFecha, Motivo: d.LMotivo };
-          cerrarCita(datos).then(function (g) {
-            toast({ realizada: 'Cita realizada', reprogramada: 'Cita reprogramada para ' + fechaCorta(g.cita.Fecha).toLowerCase(), noAsistio: 'Cita cancelada: no asistió' }[d.Que] + (g.llamada ? ' · llamada programada' : ''));
-            var prp = c.ID_Propiedad ? '&prp=' + encodeURIComponent(c.ID_Propiedad) : '';
-            var destino = siguiente === 'cita' ? '#/a/cita-nueva?tipo=' + CLASE_CITA[tc] + '&ct=' + k.tipo + '&id=' + encodeURIComponent(k.id) + prp
-              : (siguiente === 'reserva' ? '#/a/reserva-nueva?int=' + encodeURIComponent(k.id) + prp : '');
-            if (destino) { history.replaceState(null, '', destino); render(); }
-            else if (history.length > 1) history.back();
-            else ir('#/a/inicio');
-          }).catch(function () {});
+          encolar({ accion: 'cerrarCita', datos: datos });
+          toast({ realizada: 'Cita realizada', reprogramada: 'Cita reprogramada para ' + fechaCorta(datos.Fecha).toLowerCase(), noAsistio: 'Cita cancelada: no asistió' }[d.Que] + (datos.Llamada ? ' · llamada programada' : ''));
+          var prp = c.ID_Propiedad ? '&prp=' + encodeURIComponent(c.ID_Propiedad) : '';
+          var destino = siguiente === 'cita' ? '#/a/cita-nueva?tipo=' + CLASE_CITA[tc] + '&ct=' + k.tipo + '&id=' + encodeURIComponent(k.id) + prp
+            : (siguiente === 'reserva' ? '#/a/reserva-nueva?int=' + encodeURIComponent(k.id) + prp : '');
+          if (destino) { history.replaceState(null, '', destino); render(); } else volver();
         };
       });
   };
 
+  /* ---------- Llamadas ---------- */
+
   function formLlamada(l, q) {
-    var cf = conf();
-    var tipo = l ? tipoDeLlamada(l) : (q.tipo || 'interesado');
-    var v = l || { ID_Contacto: q.id || '', ID_Propiedad: '', Motivo: '', Fecha: hoy(), Estado: 'Pendiente' };
-    function opciones(t) { return opcionesContacto(t, t === 'otro'); }
-    var props = T('Propiedades');
-    pintar('<div class="pantalla">' + cabVolver(l ? 'Llamada' : 'Nueva llamada') +
-      '<form class="formulario" novalidate>' +
-      campo({ n: 'TipoContacto', l: '¿A quién vas a llamar?', t: 'seg', op: [['interesado', 'Interesado'], ['propietario', 'Propietario'], ['otro', 'Otro']], req: true }, tipo) +
-      '<div id="selContacto">' + campo({ n: 'ID_Contacto', l: 'Contacto', t: 'select', op: opciones(tipo), req: true, vacio: '— Elige un contacto —' }, v.ID_Contacto) + '</div>' +
-      '<div class="recuadro" id="nuevoOtro" hidden><span class="recuadro-titulo">Datos del contacto</span>' +
-      campo({ n: 'ONombre', l: 'Nombre', req: true, ph: 'Dr. Ramírez' }) + campo({ n: 'OCelular', l: 'Celular', t: 'tel', ph: '984 123 456' }) +
-      campo({ n: 'OCategoria', l: 'Categoría', t: 'select', op: cf.categoriasOtros }) + campo({ n: 'ODetalle', l: 'Detalle', t: 'area', ph: 'Notaría del centro, encargado de la minuta' }) + '</div>' +
-      campo({ n: 'Motivo', l: 'Motivo de la llamada', t: 'area', ph: 'Confirmar precio del terreno' }, v.Motivo) +
-      '<div class="dos-col">' + campo({ n: 'Fecha', l: 'Fecha', t: 'date' }, v.Fecha) +
-      campo({ n: 'ID_Propiedad', l: 'Propiedad', t: 'select', op: props.map(function (p) { return [p.ID, resumenProp(p)]; }), vacio: 'Ninguna' }, v.ID_Propiedad) + '</div>' +
-      (l ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ['Pendiente', 'Hecha'], req: true }, v.Estado || 'Pendiente') : '') +
-      '<div class="barra-guardar"><button class="btn primario ancho" type="submit">Guardar llamada</button>' + (l ? '<button class="btn peligro ancho" type="button" data-borrar>Eliminar llamada</button>' : '') + '</div></form></div>', function (app) {
+    var b = tomarBorrador(), v = b || l || {}, ruta = location.hash;
+    var sel = v.ID_Contacto ? { tipo: tipoDeLlamada(v), id: v.ID_Contacto } : (q.id ? { tipo: TABLA_DE[q.tipo] ? q.tipo : 'interesado', id: q.id } : null);
+    var menu = l ? botonMenu([['Eliminar llamada', function () {
+      if (confirm('¿Eliminar esta llamada?')) eliminarRegistro('Llamadas', l.ID).then(function () { toast('Llamada eliminada'); ir('#/a/llamadas'); }).catch(function () {});
+    }, 'peligro']]) : '';
+    pintar('<div class="pantalla">' + cabVolver(l ? 'Llamada' : 'Nueva llamada', menu) + '<form class="formulario" novalidate>' +
+      '<h2 class="pregunta">¿A quién?</h2><div id="quien"></div>' +
+      campo({ n: 'MotivoR', l: '¿Para qué?', t: 'chips', op: MOTIVOS, req: true }, q.motivo || '') +
+      campo({ n: 'Motivo', l: 'Detalle', t: 'area', ph: 'Escribe más si hace falta' }, v.Motivo) +
+      '<h2 class="pregunta">¿Cuándo?</h2>' + campoCuando(v.Fecha || (l ? '' : hoy()), '', false) +
+      '<details class="mas-detalles"><summary>Más detalles</summary><div class="grupo">' +
+      campo({ n: 'ID_Propiedad', l: 'Propiedad', t: 'select', op: T('Propiedades').map(function (p) { return [p.ID, resumenProp(p)]; }), vacio: 'Ninguna' }, v.ID_Propiedad) +
+      (l ? campo({ n: 'Estado', l: 'Estado', t: 'seg', op: ['Pendiente', 'Hecha'], req: true }, v.Estado || 'Pendiente') : '') + '</div></details>' +
+      '<div class="barra-guardar"><button class="btn primario ancho grande" type="submit">' + (l ? 'Guardar cambios' : 'Guardar llamada') + '</button></div></form></div>', function (app) {
         enlazarVolver(app, '#/a/llamadas');
         var form = app.querySelector('form');
-        var caja = app.querySelector('#nuevoOtro');
-        function revisar() { caja.hidden = form.ID_Contacto.value !== '__nuevo'; }
-        function cambiarTipo(t) {
-          app.querySelector('#selContacto').innerHTML = campo({ n: 'ID_Contacto', l: 'Contacto', t: 'select', op: opciones(t), req: true, vacio: '— Elige un contacto —' }, '');
-          if (t === 'otro' && !T('OtrosContactos').length) form.ID_Contacto.value = '__nuevo';
-          form.ID_Contacto.onchange = revisar; revisar();
-        }
-        form.querySelectorAll('[name=TipoContacto]').forEach(function (r) { r.onchange = function () { cambiarTipo(r.value); }; });
-        form.ID_Contacto.onchange = revisar;
-        if (tipo === 'otro' && !T('OtrosContactos').length && !v.ID_Contacto) form.ID_Contacto.value = '__nuevo';
-        revisar();
+        selectorContacto(app.querySelector('#quien'), ['interesado', 'propietario', 'otro'], sel, function (x) { sel = x; });
         form.onsubmit = function (e) {
           e.preventDefault();
-          var d = leerForm(form);
-          var t = d.TipoContacto;
-          if (!d.ID_Contacto) return errorForm(form, 'Elige a quién vas a llamar.');
-          if (d.ID_Contacto === '__nuevo' && !d.ONombre) return errorForm(form, 'Escribe el nombre del contacto.');
-          var paso = d.ID_Contacto === '__nuevo' ? guardarRegistro('OtrosContactos', { Nombre: d.ONombre, Celular: d.OCelular, Categoria: d.OCategoria, Detalle: d.ODetalle }) : Promise.resolve(null);
-          paso.then(function (nc) {
-            var reg = { TipoContacto: NOMBRE_TIPO[t], ID_Contacto: nc ? nc.ID : d.ID_Contacto, ID_Propiedad: d.ID_Propiedad, Motivo: d.Motivo, Fecha: d.Fecha, Estado: d.Estado || 'Pendiente' };
-            if (l) reg.ID = l.ID;
-            return guardarRegistro('Llamadas', reg);
-          }).then(function () { toast('Llamada guardada'); ir('#/a/llamadas'); }).catch(function () {});
-        };
-        var b = app.querySelector('[data-borrar]');
-        if (b) b.onclick = function () {
-          if (!confirm('¿Eliminar esta llamada?')) return;
-          eliminarRegistro('Llamadas', l.ID).then(function () { toast('Llamada eliminada'); ir('#/a/llamadas'); });
+          var d = leerForm(form), w = leerCuando(d);
+          if (!sel) return errorForm(form, 'Elige a quién vas a llamar.');
+          var reg = { TipoContacto: NOMBRE_TIPO[sel.tipo], ID_Contacto: sel.id, ID_Propiedad: d.ID_Propiedad, Motivo: [d.MotivoR, d.Motivo].filter(Boolean).join(': '), Fecha: w.Fecha, Estado: d.Estado || 'Pendiente' };
+          if (l) reg.ID = l.ID;
+          guardarRegistro('Llamadas', reg, ruta);
+          toast('Llamada guardada' + (w.Fecha ? ' para ' + fechaCorta(w.Fecha).toLowerCase() : ''));
+          volver('#/a/llamadas');
         };
       });
   }
@@ -1608,8 +2049,7 @@
           (activa ? '' : '<p class="item-sub">Estado de la reserva: <span class="estado ' + esc(r.Estado) + '">' + esc(r.Estado || '—') + '</span></p>') + '</div>'
         : campo({ n: 'ID_Propiedad', l: 'Propiedad', t: 'select', req: true, vacio: '— Elige la propiedad —', op: props.map(function (p) { return [p.ID, p.ID + ' · ' + resumenProp(p) + (p.Precio ? ' · ' + dinero(p.Precio) : '')]; }) }, v.ID_Propiedad) +
           (props.length ? '' : '<p class="item-sub">No hay propiedades disponibles para reservar.</p>')) +
-      campo({ n: 'ID_Interesado', l: 'Interesado que reserva', t: 'select', req: true, vacio: '— Elige al interesado —', op: opcionesContacto('interesado', true) }, v.ID_Interesado) +
-      '<div class="recuadro" id="nuevoInt" hidden><span class="recuadro-titulo">Nuevo interesado</span>' + campo({ n: 'NNombre', l: 'Nombre', req: true }) + campo({ n: 'NCelular', l: 'Celular', t: 'tel', ph: '987 654 321' }) + '</div>' +
+      '<span class="etiqueta">Cliente que reserva</span><div id="quien"></div>' +
       '<div class="dos-col">' + campo({ n: 'FechaReserva', l: 'Fecha de reserva', t: 'date' }, v.FechaReserva) + campo({ n: 'FechaLimite', l: 'Fecha límite', t: 'date' }, v.FechaLimite) + '</div>' +
       campo({ n: 'MontoSeparacion', l: 'Monto de separación (S/)', t: 'num', ph: '2000' }, v.MontoSeparacion) +
       campo({ n: 'Notas', l: 'Notas', t: 'area', ph: 'Pagó por transferencia; minuta pendiente' }, v.Notas) +
@@ -1617,30 +2057,22 @@
       '<div class="barra-guardar"><button class="btn primario ancho" type="submit">' + (r ? 'Guardar reserva' : 'Registrar reserva') + '</button>' +
       (r ? '<button class="btn peligro ancho" type="button" data-borrar>Eliminar reserva</button>' : '') + '</div></form></div>', function (app) {
         enlazarVolver(app, r ? '#/a/propiedad/' + r.ID_Propiedad : '#/a/propiedades');
-        var form = app.querySelector('form'), caja = app.querySelector('#nuevoInt');
-        function revisar() { caja.hidden = form.ID_Interesado.value !== '__nuevo'; }
-        form.ID_Interesado.onchange = revisar;
-        if (!v.ID_Interesado && !T('Interesados').length) form.ID_Interesado.value = '__nuevo';
-        revisar();
+        var form = app.querySelector('form'), cli = v.ID_Interesado ? { tipo: 'interesado', id: v.ID_Interesado } : null;
+        selectorContacto(app.querySelector('#quien'), ['interesado'], cli, function (x) { cli = x; });
         form.onsubmit = function (e) {
           e.preventDefault();
           var d = leerForm(form);
           var idp = r ? r.ID_Propiedad : d.ID_Propiedad;
           if (!idp) return errorForm(form, 'Elige la propiedad que se reserva.');
-          if (!d.ID_Interesado) return errorForm(form, 'Elige al interesado que reserva.');
-          var nuevo = d.ID_Interesado === '__nuevo';
-          if (nuevo && !d.NNombre) return errorForm(form, 'Escribe el nombre del nuevo interesado.');
+          if (!cli) return errorForm(form, 'Elige al cliente que reserva.');
           if (d.FechaLimite && d.FechaReserva && d.FechaLimite < d.FechaReserva) return errorForm(form, 'La fecha límite no puede ser anterior a la fecha de reserva.');
           var cambio = r && d.Estado && d.Estado !== r.Estado ? d.Estado : '';
           var prop = buscarId('Propiedades', idp);
           if (cambio === 'Concretada' && !confirm('¿Marcar la reserva como concretada? La propiedad pasará a "' + (prop && prop.Operacion === 'Alquiler' ? 'Alquilado' : 'Vendido') + '".')) return;
           if (cambio === 'Cancelada' && !confirm('¿Cancelar la reserva? La propiedad volverá a estar disponible en el catálogo.')) return;
-          var paso = nuevo ? guardarRegistro('Interesados', { Nombre: d.NNombre, Celular: d.NCelular, Origen: 'Agente' }) : Promise.resolve(null);
-          paso.then(function (ni) {
-            var reg = { ID_Propiedad: idp, ID_Interesado: ni ? ni.ID : d.ID_Interesado, FechaReserva: d.FechaReserva, MontoSeparacion: d.MontoSeparacion, FechaLimite: d.FechaLimite, Notas: d.Notas };
-            if (r) { reg.ID = r.ID; if (d.Estado) reg.Estado = d.Estado; }
-            return guardarReserva(reg);
-          }).then(function (g) {
+          var reg = { ID_Propiedad: idp, ID_Interesado: cli.id, FechaReserva: d.FechaReserva, MontoSeparacion: d.MontoSeparacion, FechaLimite: d.FechaLimite, Notas: d.Notas };
+          if (r) { reg.ID = r.ID; if (d.Estado) reg.Estado = d.Estado; }
+          guardarReserva(reg).then(function (g) {
             toast(!r ? 'Reserva registrada' : (cambio ? 'Reserva ' + cambio.toLowerCase() : 'Reserva guardada'));
             history.replaceState(null, '', '#/a/propiedad/' + g.ID_Propiedad); render();
           }).catch(function () {});
@@ -1655,6 +2087,7 @@
         };
       });
   }
+
   VISTAS['reserva-nueva'] = function (p, q) { formReserva(null, q); };
   VISTAS.reserva = function (p) {
     var r = buscarId('Reservas', p[0]);
@@ -1755,11 +2188,11 @@
       '<form class="formulario" novalidate data-editar>' + campo({ n: 'Nombre', l: 'Nombre', req: true }, a.Nombre) + campo({ n: 'Celular', l: 'Celular', t: 'tel', ph: '984 123 456' }, a.Celular) +
       campo({ n: 'Rol', l: 'Rol', t: 'seg', op: [['Agente', 'Agente'], [ROL_ADMIN, 'Administrador']], req: true }, a.Rol === ROL_ADMIN ? ROL_ADMIN : 'Agente') +
       '<div class="acciones-form"><button class="btn primario ancho" type="submit">Guardar cambios</button></div></form>' +
-      '<div class="seccion"><div class="seccion-cab"><h2>Contraseña</h2></div>' +
+      cabSeccion('Contraseña') +
       '<button class="btn ancho" type="button" data-restablecer aria-expanded="false" aria-controls="zonaClave">' + ic('candado', 20) + 'Restablecer contraseña</button>' +
       '<div class="recuadro neutro" id="zonaClave" hidden><span class="recuadro-titulo">Nueva contraseña temporal</span>' + campoClave('Temporal', 'Contraseña temporal', 'new-password') +
       '<p class="item-sub">Se cerrarán sus sesiones abiertas y, al entrar, deberá crear una contraseña nueva.</p><button class="btn primario" type="button" data-guardar-clave>Guardar contraseña temporal</button></div></div>' +
-      '<div class="seccion"><div class="seccion-cab"><h2>Acceso</h2></div>' +
+      cabSeccion('Acceso') +
       (yo ? '<p class="item-sub">Esta es tu cuenta. Para desactivarla, otro administrador debe hacerlo.</p>'
         : act ? '<button class="btn peligro ancho" type="button" data-baja aria-expanded="false" aria-controls="zonaBaja">Desactivar agente</button>' +
           '<div class="recuadro" id="zonaBaja" hidden><span class="recuadro-titulo">Desactivar a ' + esc(a.Nombre) + '</span><p class="item-sub">No podrá entrar a la app y se cerrarán sus sesiones al instante.</p>' +
@@ -1804,7 +2237,8 @@
           apiAdmin('estadoAgente', { ID: a.ID, Activo: 'No', ReasignarA: hacia }).then(function (g) {
             ponerEnCache('Agentes', g.agente); S.pub = null;
             toast('Agente desactivado' + (g.movidos ? ' · ' + plural(g.movidos, 'registro reasignado', 'registros reasignados') : ''));
-            if (g.movidos) cargarDb(true); else rehacer();
+            rehacer();
+            if (g.movidos) cargarDb(true); // trae los registros reasignados
           }).catch(function () {});
         };
         var bAlta = app.querySelector('[data-alta]');
@@ -1824,7 +2258,7 @@
       '<div class="ficha compacta"><p class="item-titulo">' + esc(reg.Nombre) + ' <span class="tag ' + tipo + '">' + NOMBRE_TIPO[tipo] + '</span></p>' +
       '<p class="item-sub">' + esc(reg.Celular || 'Sin celular') + '</p>' +
       (props.length ? '<p class="item-sub">También se asigna: ' + esc(props.map(resumenProp).join(' · ')) + '</p>' : '') + '</div>' +
-      '<div class="seccion"><div class="seccion-cab"><h2>¿Qué agente lo atiende?</h2></div><div class="lista">' + agentesActivos().map(function (a) {
+      cabSeccion('¿Qué agente lo atiende?') + '<div class="lista">' + agentesActivos().map(function (a) {
         return '<button class="item" type="button" data-agente="' + esc(a.ID) + '"><span class="avatar agente">' + esc(iniciales(a.Nombre)) + '</span><div class="item-cuerpo"><div class="item-titulo">' + esc(a.Nombre) + tagsAgente(a) + '</div>' +
           htmlResumen(a.ID) + '</div>' + ic('flecha', 20) + '</button>';
       }).join('') + '</div></div></div>' + nav('inicio'), function (app) {
@@ -1843,10 +2277,16 @@
 
   /* ================= Modo demo (sin servidor) ================= */
 
+  // Datos de ejemplo compactos: los nombres de los campos se escriben una vez por tabla.
+  function filas(campos, arr) {
+    campos = campos.split(' ');
+    return arr.map(function (f) { var o = {}; campos.forEach(function (c, i) { o[c] = f[i] == null ? '' : f[i]; }); return o; });
+  }
+
   // Las mismas reglas que Code.gs, con los datos guardados solo en este navegador.
   var Demo = {
     CONTRASENA: 'demo1234',
-    VERSION: 5, // si cambia, los datos de ejemplo se vuelven a crear
+    VERSION: 6, // si cambia, los datos de ejemplo se vuelven a crear
     REDES: { FACEBOOK: 'https://web.facebook.com/alquis.group', TIKTOK: 'https://www.tiktok.com/@alquis_group', INSTAGRAM: 'https://www.instagram.com/grupoalquis/' },
     DATOS: ['Propietarios', 'Interesados', 'OtrosContactos', 'Propiedades', 'Citas', 'Llamadas', 'Reservas'],
     CONTACTOS: ['Propietarios', 'Interesados', 'OtrosContactos'],
@@ -1874,72 +2314,80 @@
         Fallos: {},
         // Solo en el modo demo las contraseñas quedan en este navegador; el servidor real guarda un hash.
         Claves: { 'AGE-0001': Demo.CONTRASENA, 'AGE-0002': Demo.CONTRASENA, 'AGE-0003': Demo.CONTRASENA },
-        Agentes: [
-          { ID: 'AGE-0001', Usuario: 'aldo', Nombre: 'Aldo Quispe', Celular: '', Rol: ROL_ADMIN, Activo: 'Sí', DebeCambiarContrasena: 'No', FechaRegistro: d(-60) },
-          { ID: 'AGE-0002', Usuario: 'maria', Nombre: 'María Fernández', Celular: '984111222', Rol: 'Agente', Activo: 'Sí', DebeCambiarContrasena: 'No', FechaRegistro: d(-40) },
-          { ID: 'AGE-0003', Usuario: 'jose', Nombre: 'José Huamán', Celular: '974333444', Rol: 'Agente', Activo: 'Sí', DebeCambiarContrasena: 'No', FechaRegistro: d(-40) }
-        ],
-        Propietarios: [
-          { ID: 'PRO-0001', Nombre: 'María Quispe', Celular: '984123456', Notas: '', Origen: 'Agente', FechaRegistro: d(-20) },
-          { ID: 'PRO-0002', Nombre: 'Pedro Ccahua', Celular: '974555210', Notas: '', Origen: 'Agente', FechaRegistro: d(-15) },
-          { ID: 'PRO-0003', Nombre: 'Ana Torres', Celular: '951330778', Notas: '', Origen: 'Agente', FechaRegistro: d(-10) },
-          { ID: 'PRO-0004', Nombre: 'Julia Mendoza', Celular: '962410337', Notas: '', Origen: 'App', FechaRegistro: d(-1) }
-        ],
-        Interesados: [
-          { ID: 'INT-0001', Nombre: 'Juan Pérez', Celular: '987654321', Operacion: 'Venta', Tipo: 'Terreno', Zonas: 'San Jerónimo, San Sebastián', PresupuestoMax: '150000', AreaMin: '150', DormitoriosMin: '', Caracteristicas: 'Con título, Agua', Notas: '', Origen: 'Agente', FechaRegistro: d(-12), Temperatura: 'Tibio', DetalleInteres: 'Visitó el terreno de San Jerónimo; le gustó, pero lo ve un poco caro.' },
-          { ID: 'INT-0002', Nombre: 'Rosa Mamani', Celular: '965112449', Operacion: 'Venta', Tipo: 'Casa', Zonas: 'Wanchaq', PresupuestoMax: '260000', AreaMin: '', DormitoriosMin: '3', Caracteristicas: 'Cochera', Notas: '', Origen: 'Agente', FechaRegistro: d(-9), Temperatura: 'Caliente', DetalleInteres: 'Separó la casa de San Sebastián; espera la aprobación del crédito.' },
-          { ID: 'INT-0003', Nombre: 'Luis Condori', Celular: '942870615', Operacion: 'Venta', Tipo: 'Casa', Zonas: '', PresupuestoMax: '250000', AreaMin: '', DormitoriosMin: '', Caracteristicas: '', Notas: '', Origen: 'App', FechaRegistro: d(-5), Temperatura: 'Frío', DetalleInteres: '' },
-          { ID: 'INT-0004', Nombre: 'Carlos Huamán', Celular: '958221904', Operacion: 'Venta', Tipo: 'Departamento', Zonas: 'Santiago, Wanchaq', PresupuestoMax: '200000', AreaMin: '', DormitoriosMin: '2', Caracteristicas: '', Notas: '', Origen: 'Agente', FechaRegistro: d(-6), Temperatura: 'Caliente', DetalleInteres: 'Reservó el departamento de Santiago. Firma en una semana.' },
-          { ID: 'INT-0005', Nombre: 'Elena Vargas', Celular: '951778204', Operacion: 'Venta', Tipo: 'Casa', Zonas: 'Wanchaq', PresupuestoMax: '230000', AreaMin: '', DormitoriosMin: '2', Caracteristicas: '', Notas: '', Origen: 'App', FechaRegistro: d(-1), Temperatura: 'Frío', DetalleInteres: '' }
-        ],
-        OtrosContactos: [
-          { ID: 'OTR-0001', Nombre: 'Dr. Ramírez', Celular: '984700120', Categoria: 'Notario', Detalle: 'Notaría del centro', FechaRegistro: d(-30) },
-          { ID: 'OTR-0002', Nombre: 'Jorge Huallpa', Celular: '973450882', Categoria: 'Topógrafo', Detalle: 'Planos y linderos', FechaRegistro: d(-25) }
-        ],
-        Propiedades: [
-          { ID: 'PRP-0001', ID_Propietario: 'PRO-0001', Operacion: 'Venta', Tipo: 'Terreno', Zona: 'San Jerónimo', Direccion: 'Calle Los Pinos s/n', Area: '200', Dormitorios: '', Precio: '120000', Caracteristicas: 'Con título, Agua, Luz', Descripcion: 'Terreno plano, cerca a la avenida principal.', Estado: 'Disponible', Origen: 'Agente', FechaRegistro: d(-20) },
-          { ID: 'PRP-0002', ID_Propietario: 'PRO-0002', Operacion: 'Venta', Tipo: 'Casa', Zona: 'Wanchaq', Direccion: 'Jr. Los Álamos 210', Area: '160', Dormitorios: '3', Precio: '240000', Caracteristicas: 'Con título, Agua, Luz, Desagüe, Cochera', Descripcion: 'Casa de dos pisos con patio.', Estado: 'Disponible', Origen: 'Agente', FechaRegistro: d(-15) },
-          { ID: 'PRP-0003', ID_Propietario: 'PRO-0003', Operacion: 'Venta', Tipo: 'Departamento', Zona: 'Santiago', Direccion: 'Av. Antonio Lorena 455', Area: '85', Dormitorios: '2', Precio: '180000', Caracteristicas: 'Agua, Luz, Desagüe', Descripcion: '', Estado: 'Reservado', Origen: 'Agente', FechaRegistro: d(-10) },
-          { ID: 'PRP-0004', ID_Propietario: 'PRO-0001', Operacion: 'Venta', Tipo: 'Terreno', Zona: 'San Sebastián', Direccion: '', Area: '300', Dormitorios: '', Precio: '185000', Caracteristicas: 'Con título, Agua', Descripcion: '', Estado: 'Disponible', Origen: 'Agente', FechaRegistro: d(-8) },
-          { ID: 'PRP-0005', ID_Propietario: 'PRO-0004', Operacion: 'Alquiler', Tipo: 'Departamento', Zona: 'Wanchaq', Direccion: 'Calle Tacna 120', Area: '70', Dormitorios: '2', Precio: '1500', Caracteristicas: 'Agua, Luz', Descripcion: 'Departamento amoblado.', Estado: 'Pendiente', Origen: 'App', FechaRegistro: d(-1) },
-          { ID: 'PRP-0006', ID_Propietario: 'PRO-0002', Operacion: 'Venta', Tipo: 'Casa', Zona: 'San Sebastián', Direccion: 'Urb. Túpac Amaru B-12', Area: '140', Dormitorios: '3', Precio: '210000', Caracteristicas: 'Con título, Agua, Luz, Desagüe, Jardín', Descripcion: 'Casa de un piso con jardín interior.', Estado: 'Reservado', Origen: 'Agente', FechaRegistro: d(-18) },
-          { ID: 'PRP-0007', ID_Propietario: 'PRO-0003', Operacion: 'Alquiler', Tipo: 'Local', Zona: 'Cusco Centro', Direccion: 'Calle Plateros 330', Area: '45', Dormitorios: '', Precio: '2800', Caracteristicas: 'Agua, Luz', Descripcion: 'Local comercial a media cuadra de la plaza.', Estado: 'Reservado', Origen: 'Agente', FechaRegistro: d(-14) }
-        ],
-        Citas: [
-          { ID: 'CIT-0001', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0001', Fecha: h, Hora: '10:00', Notas: 'Llevar plano', Estado: 'Pendiente', FechaRegistro: d(-3) },
-          { ID: 'CIT-0002', ID_Interesado: 'INT-0002', ID_Propiedad: 'PRP-0002', Fecha: h, Hora: '12:30', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-2) },
-          { ID: 'CIT-0003', ID_Interesado: 'INT-0004', ID_Propiedad: 'PRP-0003', Fecha: h, Hora: '16:00', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-2) },
-          { ID: 'CIT-0004', ID_Interesado: 'INT-0003', ID_Propiedad: 'PRP-0002', Fecha: d(2), Hora: '09:30', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-1) },
-          { ID: 'CIT-0005', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0004', Fecha: d(7), Hora: '10:00', Notas: '', Estado: 'Pendiente', FechaRegistro: d(-1) },
-          { ID: 'CIT-0006', ID_Interesado: '', ID_Propiedad: '', Fecha: h, Hora: '15:30', Notas: 'Quiere vender un terreno en Santiago.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0003' },
-          { ID: 'CIT-0007', ID_Interesado: '', ID_Propiedad: 'PRP-0004', Fecha: d(1), Hora: '11:00', Notas: 'Tomar fotos y medidas del terreno.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0001' },
-          { ID: 'CIT-0008', ID_Interesado: '', ID_Propiedad: 'PRP-0003', Fecha: d(1), Hora: '17:00', Notas: 'Revisar la minuta del departamento reservado.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Reunión', TipoContacto: 'Otro', ID_Contacto: 'OTR-0001' },
-          { ID: 'CIT-0009', ID_Interesado: '', ID_Propiedad: '', Fecha: d(3), Hora: '10:30', Notas: 'Firmar la autorización de venta.', Estado: 'Pendiente', FechaRegistro: d(-1), TipoCita: 'Reunión', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0002' },
-          { ID: 'CIT-0010', ID_Interesado: 'INT-0002', ID_Propiedad: 'PRP-0006', Fecha: d(-6), Hora: '18:00', Notas: 'Conversar la forma de pago.', Estado: 'Realizada', FechaRegistro: d(-8), TipoCita: 'Reunión', TipoContacto: 'Interesado', ID_Contacto: 'INT-0002', Resultado: 'Acordó separar la casa con S/ 3 000 mientras le aprueban el crédito.' },
-          { ID: 'CIT-0011', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0001', Fecha: d(-12), Hora: '11:00', Notas: '', Estado: 'Realizada', FechaRegistro: d(-13), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: 'Le gustó el terreno, pero pidió una rebaja. Lo conversa con su familia.' },
-          { ID: 'CIT-0012', ID_Interesado: 'INT-0004', ID_Propiedad: 'PRP-0003', Fecha: d(-5), Hora: '17:00', Notas: '', Estado: 'Realizada', FechaRegistro: d(-6), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0004', Resultado: 'Le encantó. Separa mañana con S/ 2 000.' },
-          { ID: 'CIT-0013', ID_Interesado: 'INT-0003', ID_Propiedad: 'PRP-0002', Fecha: d(-3), Hora: '10:00', Notas: '', Estado: 'Cancelada', FechaRegistro: d(-4), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0003', Resultado: 'No asistió. No contestó el celular.' },
-          { ID: 'CIT-0014', ID_Interesado: 'INT-0001', ID_Propiedad: 'PRP-0004', Fecha: d(-1), Hora: '16:00', Notas: 'Mostrar el terreno más grande.', Estado: 'Pendiente', FechaRegistro: d(-3), TipoCita: 'Visita', TipoContacto: 'Interesado', ID_Contacto: 'INT-0001', Resultado: '' },
-          { ID: 'CIT-0015', ID_Interesado: '', ID_Propiedad: 'PRP-0006', Fecha: d(-2), Hora: '11:30', Notas: 'Revisar documentos de la casa.', Estado: 'Pendiente', FechaRegistro: d(-4), TipoCita: 'Captación', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0002', Resultado: '' }
-        ],
-        Reservas: [
-          { ID: 'RES-0001', ID_Propiedad: 'PRP-0003', ID_Interesado: 'INT-0004', FechaReserva: d(-4), MontoSeparacion: '2000', FechaLimite: d(6), Estado: 'Activa', Notas: 'Pagó por transferencia.', FechaRegistro: d(-4) },
-          { ID: 'RES-0002', ID_Propiedad: 'PRP-0006', ID_Interesado: 'INT-0002', FechaReserva: d(-6), MontoSeparacion: '3000', FechaLimite: d(2), Estado: 'Activa', Notas: 'Espera la aprobación del crédito.', FechaRegistro: d(-6) },
-          { ID: 'RES-0003', ID_Propiedad: 'PRP-0007', ID_Interesado: 'INT-0004', FechaReserva: d(-9), MontoSeparacion: '500', FechaLimite: d(-1), Estado: 'Activa', Notas: 'Lo quiere para una oficina.', FechaRegistro: d(-9) },
-          { ID: 'RES-0004', ID_Propiedad: 'PRP-0001', ID_Interesado: 'INT-0001', FechaReserva: d(-12), MontoSeparacion: '1000', FechaLimite: d(-5), Estado: 'Cancelada', Notas: 'Desistió por el precio.', FechaRegistro: d(-12) }
-        ],
-        Llamadas: [
-          { ID: 'LLA-0001', TipoContacto: 'Interesado', ID_Contacto: 'INT-0002', ID_Propiedad: 'PRP-0002', Motivo: 'Enviar más datos de la casa en Wanchaq', Fecha: d(-1), Estado: 'Pendiente', FechaRegistro: d(-3) },
-          { ID: 'LLA-0002', TipoContacto: 'Propietario', ID_Contacto: 'PRO-0001', ID_Propiedad: 'PRP-0001', Motivo: 'Confirmar precio del terreno', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
-          { ID: 'LLA-0003', TipoContacto: 'Interesado', ID_Contacto: 'INT-0003', ID_Propiedad: '', Motivo: 'Ofrecer casas hasta S/ 250 000', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
-          { ID: 'LLA-0004', TipoContacto: 'Otro', ID_Contacto: 'OTR-0001', ID_Propiedad: 'PRP-0003', Motivo: 'Ver minuta del departamento de Santiago', Fecha: h, Estado: 'Pendiente', FechaRegistro: d(-2) },
-          { ID: 'LLA-0005', TipoContacto: 'Otro', ID_Contacto: 'OTR-0002', ID_Propiedad: '', Motivo: 'Cotizar plano perimétrico', Fecha: d(3), Estado: 'Pendiente', FechaRegistro: d(-1) }
-        ]
+        Agentes: filas('ID Usuario Nombre Celular Rol Activo DebeCambiarContrasena FechaRegistro', [
+          ['AGE-0001', 'aldo', 'Aldo Quispe', '', 'Administrador', 'Sí', 'No', d(-60)],
+          ['AGE-0002', 'maria', 'María Fernández', '984111222', 'Agente', 'Sí', 'No', d(-40)],
+          ['AGE-0003', 'jose', 'José Huamán', '974333444', 'Agente', 'Sí', 'No', d(-40)]
+        ]),
+        Propietarios: filas('ID Nombre Celular Origen FechaRegistro Notas', [
+          ['PRO-0001', 'María Quispe', '984123456', 'Agente', d(-20)],
+          ['PRO-0002', 'Pedro Ccahua', '974555210', 'Agente', d(-15)],
+          ['PRO-0003', 'Ana Torres', '951330778', 'Agente', d(-10)],
+          ['PRO-0004', 'Julia Mendoza', '962410337', 'App', d(-1)]
+        ]),
+        Interesados: filas('ID Nombre Celular Operacion Tipo Zonas PresupuestoMax AreaMin DormitoriosMin Caracteristicas Origen FechaRegistro Temperatura DetalleInteres EstadoSeguimiento OpcionesAvisadas Notas', [
+          ['INT-0001', 'Juan Pérez', '987654321', 'Venta', 'Terreno', 'San Jerónimo, San Sebastián', '150000', '150', '', 'Con título, Agua', 'Agente', d(-12), 'Tibio', 'Visitó el terreno de San Jerónimo; le gustó, pero lo ve un poco caro.', 'Activo'],
+          ['INT-0002', 'Rosa Mamani', '965112449', 'Venta', 'Casa', 'Wanchaq', '260000', '', '3', 'Cochera', 'Agente', d(-9), 'Caliente', 'Separó la casa de San Sebastián; espera la aprobación del crédito.'],
+          ['INT-0003', 'Luis Condori', '942870615', 'Venta', 'Casa', '', '250000', '', '', '', 'App', d(-5), 'Frío'],
+          ['INT-0004', 'Carlos Huamán', '958221904', 'Venta', 'Departamento', 'Santiago, Wanchaq', '200000', '', '2', '', 'Agente', d(-6), 'Caliente', 'Reservó el departamento de Santiago. Firma en una semana.'],
+          ['INT-0005', 'Elena Vargas', '951778204', 'Venta', 'Casa', 'Wanchaq', '230000', '', '2', '', 'App', d(-1), 'Frío'],
+          ['INT-0006', 'Sofía Paredes', '984550671', 'Venta', 'Casa', 'Wanchaq', '250000', '', '3', '', 'Agente', d(-8), 'Caliente', 'Quiere mudarse antes de fin de año.', 'Activo'],
+          ['INT-0007', 'Diego Ramos', '973118450', '', '', '', '', '', '', '', 'Agente', d(-4), 'Tibio', 'Pidió que lo llamen la próxima semana.', 'Activo'],
+          ['INT-0008', 'Pilar Soto', '962004318', 'Venta', 'Terreno', 'San Jerónimo', '140000', '', '', '', 'Agente', d(-20), 'Tibio', 'Busca un terreno con título en San Jerónimo.', 'En espera', 'PRP-0001'],
+          ['INT-0009', 'Raúl Mendoza', '951602233', 'Alquiler', 'Local', 'Cusco Centro', '2000', '', '', '', 'Agente', d(-15), 'Frío', 'Quiere un local pequeño para una cafetería.', 'En espera'],
+          ['INT-0010', 'Martín Ríos', '940772615', 'Venta', 'Departamento', 'Santiago', '190000', '', '2', '', 'Agente', d(-50), 'Caliente', 'Compró en septiembre.', 'Compró'],
+          ['INT-0011', 'Gloria Huamán', '958330147', 'Venta', 'Casa', 'San Sebastián', '120000', '', '', '', 'Agente', d(-40), 'Frío', 'Ya no busca: se quedará en su casa actual.', 'Descartado']
+        ]),
+        OtrosContactos: filas('ID Nombre Celular Categoria Detalle FechaRegistro', [
+          ['OTR-0001', 'Dr. Ramírez', '984700120', 'Notario', 'Notaría del centro', d(-30)],
+          ['OTR-0002', 'Jorge Huallpa', '973450882', 'Topógrafo', 'Planos y linderos', d(-25)]
+        ]),
+        Propiedades: filas('ID ID_Propietario Operacion Tipo Zona Direccion Area Dormitorios Precio Caracteristicas Descripcion Estado Origen FechaRegistro', [
+          ['PRP-0001', 'PRO-0001', 'Venta', 'Terreno', 'San Jerónimo', 'Calle Los Pinos s/n', '200', '', '120000', 'Con título, Agua, Luz', 'Terreno plano, cerca a la avenida principal.', 'Disponible', 'Agente', d(-20)],
+          ['PRP-0002', 'PRO-0002', 'Venta', 'Casa', 'Wanchaq', 'Jr. Los Álamos 210', '160', '3', '240000', 'Con título, Agua, Luz, Desagüe, Cochera', 'Casa de dos pisos con patio.', 'Disponible', 'Agente', d(-15)],
+          ['PRP-0003', 'PRO-0003', 'Venta', 'Departamento', 'Santiago', 'Av. Antonio Lorena 455', '85', '2', '180000', 'Agua, Luz, Desagüe', '', 'Reservado', 'Agente', d(-10)],
+          ['PRP-0004', 'PRO-0001', 'Venta', 'Terreno', 'San Sebastián', '', '300', '', '185000', 'Con título, Agua', '', 'Disponible', 'Agente', d(-8)],
+          ['PRP-0005', 'PRO-0004', 'Alquiler', 'Departamento', 'Wanchaq', 'Calle Tacna 120', '70', '2', '1500', 'Agua, Luz', 'Departamento amoblado.', 'Pendiente', 'App', d(-1)],
+          ['PRP-0006', 'PRO-0002', 'Venta', 'Casa', 'San Sebastián', 'Urb. Túpac Amaru B-12', '140', '3', '210000', 'Con título, Agua, Luz, Desagüe, Jardín', 'Casa de un piso con jardín interior.', 'Reservado', 'Agente', d(-18)],
+          ['PRP-0007', 'PRO-0003', 'Alquiler', 'Local', 'Cusco Centro', 'Calle Plateros 330', '45', '', '2800', 'Agua, Luz', 'Local comercial a media cuadra de la plaza.', 'Reservado', 'Agente', d(-14)],
+          ['PRP-0008', 'PRO-0001', 'Venta', 'Terreno', 'San Jerónimo', 'Pasaje Las Flores', '180', '', '135000', 'Con título, Agua, Luz', 'Terreno recién captado, listo para construir.', 'Disponible', 'Agente', h]
+        ]),
+        Citas: filas('ID ID_Interesado ID_Propiedad Fecha Hora Notas Estado FechaRegistro TipoCita TipoContacto ID_Contacto Resultado', [
+          ['CIT-0001', 'INT-0001', 'PRP-0001', h, '10:00', 'Llevar plano', 'Pendiente', d(-3)],
+          ['CIT-0002', 'INT-0002', 'PRP-0002', h, '12:30', '', 'Pendiente', d(-2)],
+          ['CIT-0003', 'INT-0004', 'PRP-0003', h, '16:00', '', 'Pendiente', d(-2)],
+          ['CIT-0004', 'INT-0003', 'PRP-0002', d(2), '09:30', '', 'Pendiente', d(-1)],
+          ['CIT-0005', 'INT-0001', 'PRP-0004', d(7), '10:00', '', 'Pendiente', d(-1)],
+          ['CIT-0006', '', '', h, '15:30', 'Quiere vender un terreno en Santiago.', 'Pendiente', d(-1), 'Captación', 'Propietario', 'PRO-0003'],
+          ['CIT-0007', '', 'PRP-0004', d(1), '11:00', 'Tomar fotos y medidas del terreno.', 'Pendiente', d(-1), 'Captación', 'Propietario', 'PRO-0001'],
+          ['CIT-0008', '', 'PRP-0003', d(1), '17:00', 'Revisar la minuta del departamento reservado.', 'Pendiente', d(-1), 'Reunión', 'Otro', 'OTR-0001'],
+          ['CIT-0009', '', '', d(3), '10:30', 'Firmar la autorización de venta.', 'Pendiente', d(-1), 'Reunión', 'Propietario', 'PRO-0002'],
+          ['CIT-0010', 'INT-0002', 'PRP-0006', d(-6), '18:00', 'Conversar la forma de pago.', 'Realizada', d(-8), 'Reunión', 'Interesado', 'INT-0002', 'Acordó separar la casa con S/ 3 000 mientras le aprueban el crédito.'],
+          ['CIT-0011', 'INT-0001', 'PRP-0001', d(-12), '11:00', '', 'Realizada', d(-13), 'Visita', 'Interesado', 'INT-0001', 'Le gustó el terreno, pero pidió una rebaja. Lo conversa con su familia.'],
+          ['CIT-0012', 'INT-0004', 'PRP-0003', d(-5), '17:00', '', 'Realizada', d(-6), 'Visita', 'Interesado', 'INT-0004', 'Le encantó. Separa mañana con S/ 2 000.'],
+          ['CIT-0013', 'INT-0003', 'PRP-0002', d(-3), '10:00', '', 'Cancelada', d(-4), 'Visita', 'Interesado', 'INT-0003', 'No asistió. No contestó el celular.'],
+          ['CIT-0014', 'INT-0001', 'PRP-0004', d(-1), '16:00', 'Mostrar el terreno más grande.', 'Pendiente', d(-3), 'Visita', 'Interesado', 'INT-0001'],
+          ['CIT-0015', '', 'PRP-0006', d(-2), '11:30', 'Revisar documentos de la casa.', 'Pendiente', d(-4), 'Captación', 'Propietario', 'PRO-0002']
+        ]),
+        Reservas: filas('ID ID_Propiedad ID_Interesado FechaReserva MontoSeparacion FechaLimite Estado Notas FechaRegistro', [
+          ['RES-0001', 'PRP-0003', 'INT-0004', d(-4), '2000', d(6), 'Activa', 'Pagó por transferencia.', d(-4)],
+          ['RES-0002', 'PRP-0006', 'INT-0002', d(-6), '3000', d(2), 'Activa', 'Espera la aprobación del crédito.', d(-6)],
+          ['RES-0003', 'PRP-0007', 'INT-0004', d(-9), '500', d(-1), 'Activa', 'Lo quiere para una oficina.', d(-9)],
+          ['RES-0004', 'PRP-0001', 'INT-0001', d(-12), '1000', d(-5), 'Cancelada', 'Desistió por el precio.', d(-12)]
+        ]),
+        Llamadas: filas('ID TipoContacto ID_Contacto ID_Propiedad Motivo Fecha Estado FechaRegistro', [
+          ['LLA-0001', 'Interesado', 'INT-0002', 'PRP-0002', 'Enviar más datos de la casa en Wanchaq', d(-1), 'Pendiente', d(-3)],
+          ['LLA-0002', 'Propietario', 'PRO-0001', 'PRP-0001', 'Confirmar precio del terreno', h, 'Pendiente', d(-2)],
+          ['LLA-0003', 'Interesado', 'INT-0003', '', 'Ofrecer casas hasta S/ 250 000', h, 'Pendiente', d(-2)],
+          ['LLA-0004', 'Otro', 'OTR-0001', 'PRP-0003', 'Ver minuta del departamento de Santiago', h, 'Pendiente', d(-2)],
+          ['LLA-0005', 'Otro', 'OTR-0002', '', 'Cotizar plano perimétrico', d(3), 'Pendiente', d(-1)],
+          ['LLA-0006', 'Interesado', 'INT-0001', 'PRP-0004', 'Enviar fotos del terreno de San Sebastián', d(-2), 'Pendiente', d(-3)]
+        ])
       };
       // Aldo (administrador), María y José tienen sus propios registros. El resto llegó desde la app y está sin asignar.
       var duenos = {
         'AGE-0001': ['PRO-0003', 'PRP-0003', 'PRP-0007', 'INT-0004', 'OTR-0001', 'CIT-0003', 'CIT-0006', 'CIT-0008', 'CIT-0012', 'RES-0001', 'RES-0003', 'LLA-0004'],
-        'AGE-0002': ['PRO-0001', 'PRP-0001', 'PRP-0004', 'INT-0001', 'OTR-0002', 'CIT-0001', 'CIT-0005', 'CIT-0007', 'CIT-0011', 'CIT-0014', 'RES-0004', 'LLA-0002', 'LLA-0005'],
+        'AGE-0002': ['PRO-0001', 'PRP-0001', 'PRP-0004', 'PRP-0008', 'INT-0001', 'INT-0006', 'INT-0007', 'INT-0008', 'INT-0009', 'INT-0010', 'INT-0011', 'OTR-0002', 'CIT-0001', 'CIT-0005', 'CIT-0007', 'CIT-0011', 'CIT-0014', 'RES-0004', 'LLA-0002', 'LLA-0005', 'LLA-0006'],
         'AGE-0003': ['PRO-0002', 'PRP-0002', 'PRP-0006', 'INT-0002', 'INT-0003', 'CIT-0002', 'CIT-0004', 'CIT-0009', 'CIT-0010', 'CIT-0013', 'CIT-0015', 'RES-0002', 'LLA-0001', 'LLA-0003']
       };
       var dueno = {};
@@ -2106,9 +2554,31 @@
       if (Demo.CONTACTOS.some(function (t) { return db[t].some(function (x) { return x.ID_Agente && x.ID_Agente !== dueno && Demo.digitos(x.Celular) === d; }); })) Demo.falla(Demo.MSJ_DUPLICADO, true);
     },
     revisarTemperatura: function (reg, nuevo) {
-      var t = String(reg.Temperatura == null ? '' : reg.Temperatura).trim();
+      var t = String(reg.Temperatura == null ? '' : reg.Temperatura).trim(), e = String(reg.EstadoSeguimiento == null ? '' : reg.EstadoSeguimiento).trim();
       if (t && TEMPERATURAS.indexOf(t) < 0) Demo.falla('Elige un nivel de interés válido: Frío, Tibio o Caliente.');
+      if (e && ESTADOS_SEG.indexOf(e) < 0) Demo.falla('Elige un estado válido: Activo, En espera, Compró o Descartado.');
       if (nuevo && !t) reg.Temperatura = 'Frío';
+      if (nuevo && !e) reg.EstadoSeguimiento = 'Activo';
+    },
+    // Igual que lote() en Code.gs.
+    lote: function (db, ag, ops) {
+      var reales = {}, fallidos = [];
+      return (ops || []).map(function (op) {
+        var texto = JSON.stringify(op.datos || {});
+        if (fallidos.some(function (t) { return texto.indexOf('"' + t + '"') >= 0; })) { if (op.tmp) fallidos.push(op.tmp); return { ok: false, omitida: true }; }
+        try {
+          var datos = JSON.parse(texto, function (k, v) { return typeof v === 'string' && reales[v] ? reales[v] : v; }), r;
+          if (op.accion === 'guardar') { r = Demo.guardarRegistro(db, ag, op.tabla, datos, op.confirmarDuplicado === true); if (op.tmp) reales[op.tmp] = r.ID; }
+          else if (op.accion === 'cerrarCita') { r = Demo.cerrarCita(db, ag, datos); if (op.tmp && r.llamada) reales[op.tmp] = r.llamada.ID; }
+          else Demo.falla('Acción desconocida.');
+          return { ok: true, data: r };
+        } catch (e) {
+          if (op.tmp) fallidos.push(op.tmp);
+          var res = { ok: false, error: String(e.message || e) };
+          if (e.duplicado) res.duplicado = true;
+          return res;
+        }
+      });
     },
     reservaActiva: function (db, idp, salvo) {
       return db.Reservas.find(function (r) { return r.ID_Propiedad === idp && r.Estado === 'Activa' && r.ID !== salvo; });
@@ -2122,7 +2592,8 @@
       if (Demo.DATOS.indexOf(tabla) < 0) Demo.falla('Tabla no válida.');
       if (tabla === 'Reservas') Demo.falla('Las reservas se guardan con su propio formulario.');
       reg = Object.assign({}, reg || {});
-      if (!String(reg[Demo.OBLIGATORIOS[tabla]] || '').trim()) Demo.falla('Falta el campo ' + Demo.OBLIGATORIOS[tabla] + '.');
+      var ob = Demo.OBLIGATORIOS[tabla];
+      if ((!reg.ID || ob in reg) && !String(reg[ob] || '').trim()) Demo.falla('Falta el campo ' + ob + '.');
       delete reg.ID_Agente;
       if (tabla === 'Citas' && reg.TipoContacto === 'Interesado' && reg.ID_Contacto) reg.ID_Interesado = reg.ID_Contacto;
       if (tabla === 'Interesados') Demo.revisarTemperatura(reg, !reg.ID);
@@ -2169,14 +2640,17 @@
       if (previa) datos.ID = previa.ID;
       else { datos.ID_Agente = dueno; if (!datos.FechaReserva) datos.FechaReserva = hoy(); }
       var reserva = Demo.copia(Demo.insertar(db, 'Reservas', datos));
-      var propiedad = null;
+      var propiedad = null, interesado = null;
       if (estado === 'Activa' && prop.Estado !== 'Reservado') propiedad = Demo.insertar(db, 'Propiedades', { ID: prop.ID, Estado: 'Reservado' });
-      if (estado === 'Concretada' && antes !== 'Concretada') propiedad = Demo.insertar(db, 'Propiedades', { ID: prop.ID, Estado: prop.Operacion === 'Alquiler' ? 'Alquilado' : 'Vendido' });
+      if (estado === 'Concretada' && antes !== 'Concretada') {
+        propiedad = Demo.insertar(db, 'Propiedades', { ID: prop.ID, Estado: prop.Operacion === 'Alquiler' ? 'Alquilado' : 'Vendido' });
+        interesado = Demo.insertar(db, 'Interesados', { ID: idInt, EstadoSeguimiento: 'Compró' });
+      }
       if (estado === 'Cancelada' && antes !== 'Cancelada') propiedad = Demo.liberar(db, prop.ID);
-      return { reserva: reserva, propiedad: Demo.copia(propiedad) };
+      return { reserva: reserva, propiedad: Demo.copia(propiedad), interesado: Demo.copia(interesado) };
     },
     cerrarCita: function (db, ag, d) {
-      var estado = { realizada: 'Realizada', reprogramada: 'Pendiente', noAsistio: 'Cancelada' }[d.Que];
+      var estado = ESTADO_CITA_SEGUN[d.Que];
       if (!estado) Demo.falla('Elige qué pasó con la cita.');
       var fecha = String(d.Fecha || '').trim();
       if (d.Que === 'reprogramada' && !esIso(fecha)) Demo.falla('Elige la nueva fecha de la cita.');
@@ -2187,7 +2661,7 @@
         var actual = Demo.buscar(db, 'Interesados', k.id);
         if (!actual || actual.ID_Agente !== cita.ID_Agente) Demo.falla('El interesado de esta cita ya no existe o es de otro agente.');
         interesado = { ID: k.id };
-        ['Temperatura', 'DetalleInteres', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (c) {
+        ['Temperatura', 'DetalleInteres', 'EstadoSeguimiento', 'OpcionesAvisadas', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (c) {
           if (c in d.Interesado) interesado[c] = String(d.Interesado[c] == null ? '' : d.Interesado[c]).trim();
         });
         Demo.revisarTemperatura(interesado, false);
@@ -2227,7 +2701,7 @@
         }
         if (a === 'registrarInteres') {
           var r = {}; ['Nombre', 'Celular', 'Operacion', 'Tipo', 'Zonas', 'PresupuestoMax', 'AreaMin', 'DormitoriosMin', 'Caracteristicas'].forEach(function (k) { r[k] = d[k] || ''; });
-          r.Origen = 'App'; r.Temperatura = 'Frío'; r.DetalleInteres = ''; r.ID_Agente = '';
+          r.Origen = 'App'; r.Temperatura = 'Frío'; r.DetalleInteres = ''; r.ID_Agente = ''; r.EstadoSeguimiento = 'Activo';
           Demo.insertar(db, 'Interesados', r);
           return { ok: true };
         }
@@ -2243,6 +2717,7 @@
           o.Agentes = Demo.esAdmin(ag) ? db.Agentes.map(Demo.copia) : [Demo.copia(ag)];
           return { ok: true, data: o };
         }
+        if (a === 'lote') return { ok: true, data: Demo.lote(db, ag, d.ops) };
         if (a === 'guardar') return { ok: true, data: Demo.guardarRegistro(db, ag, d.tabla, d.registro, d.confirmarDuplicado === true) };
         if (a === 'guardarReserva') return { ok: true, data: Demo.guardarReserva(db, ag, d.registro) };
         if (a === 'cerrarCita') return { ok: true, data: Demo.cerrarCita(db, ag, d) };
@@ -2266,9 +2741,11 @@
   /* ================= Inicio ================= */
 
   guardarLocal('inmo_pin', null); // la versión anterior guardaba el PIN aquí
+  guardarLocal('inmo_cola', null);
+  cargarCola();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(function () {});
   }
-  if (typeof module !== 'undefined') module.exports = { coincidencia: coincidencia, recomendarPara: recomendarPara, interesadosPara: interesadosPara, Demo: Demo, etiquetaReservado: etiquetaReservado, contactoDeCita: contactoDeCita, temperatura: temperatura, yaPaso: yaPaso, faltaResultado: faltaResultado, textoNoAsistio: textoNoAsistio };
-  else render();
+  if (typeof module !== 'undefined') module.exports = { coincidencia: coincidencia, recomendarPara: recomendarPara, interesadosPara: interesadosPara, Demo: Demo, etiquetaReservado: etiquetaReservado, contactoDeCita: contactoDeCita, temperatura: temperatura, yaPaso: yaPaso, faltaResultado: faltaResultado, textoNoAsistio: textoNoAsistio, fmtCel: fmtCel, fmtMiles: fmtMiles };
+  else { render(); enviar(); }
 })();
